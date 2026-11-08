@@ -1,0 +1,14 @@
+{
+  "name": "agent-bot-souls",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The Soul runtime for the Soul Agent Platform: entry point, member supervision and the recovery ladder.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
