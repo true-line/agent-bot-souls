@@ -1,8 +1,8 @@
 # AGENTS.md
 
 agent-bot-souls is the Soul runtime for the Soul Agent Platform: the entry
-point (`agent-bot soul run`) that supervises a Soul's members inside the Soul
-and runs the recovery ladder. It is untrusted for authority: keys and grant
+point (`agent-bot-souls run`, reached as `agent-bot souls run`) that
+supervises a Soul's members inside the Soul and runs the recovery ladder. It is untrusted for authority: keys and grant
 decisions belong to HQ (agent-bot-daemon). Harness instruction files live in
 the user directory, not in this repository (ENG-0384).
 
@@ -24,13 +24,16 @@ Shared agent conventions, skills, SOPs and org-wide decisions are discovered fro
 | --- | --- |
 | Requirements, tests, architecture, trust domains, repository charters, seams, cross-repository decisions, glossary | The platform, read at `main`. Link to it; never copy it here. |
 | Schemas, fixtures and error codes | true-line/soul-contracts, pinned by commit. No copies here. |
-| The migration steps this repository carries | agent-bot-daemon's [plan, section 9](https://github.com/true-line/agent-bot-daemon/blob/main/docs/daemon-plugin-split.md#9-migration-plan) (row 14, the entry point) |
+| The migration steps this repository carries | agent-bot-hq's [plan, section 9](https://github.com/true-line/agent-bot-hq/blob/main/docs/daemon-plugin-split.md#9-migration-plan) (row 14, the entry point) |
+| What the entry point does and how its parts fit | [docs/entry-point.md](docs/entry-point.md) |
+| The agent-bot-hq and agent-bot-comms revisions the tests run against | [governance/pins.json](governance/pins.json) |
 
 ## Rules
 
 - **The platform wins.** Where this repository disagrees with the platform, follow the platform and record the conflict in its drift register.
 - **No authority here.** No signing keys, no grant decisions, no credentials at rest. The runtime asks HQ over `hq/v1` and the broker; it never decides for itself.
 - **No schema edits to make code pass.** A contract change goes through soul-contracts first.
+- **Tests run the real HQ.** They fetch agent-bot-hq and agent-bot-comms at the pinned commits and run the entry point against them. A stand-in HQ would only show that the entry point agrees with itself. Moving a pin is one reviewed change to `governance/pins.json`.
 - **No personal names.** Write "the owner" or "True Line AI LLC".
 
 ## Validate before push
@@ -39,4 +42,6 @@ Shared agent conventions, skills, SOPs and org-wide decisions are discovered fro
 npm test
 ```
 
-Node 20 or later, no dependencies.
+Node 20 or later, no dependencies. The first run needs network access to
+fetch the pinned repositories into `node_modules/.cache`; with no cache and
+no network the tests fail, they never skip.
