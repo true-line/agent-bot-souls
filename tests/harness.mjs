@@ -15,6 +15,7 @@ const hqHarness = await load(hqDir, 'tests/hq-harness.mjs');
 const { brokerPlugin } = await load(commsDir, 'lib/hq-plugin/broker.mjs');
 export const { validate } = await load(hqDir, 'sdk/wire/schema.mjs');
 export const { connectSocket } = await load(hqDir, 'hq/socket.mjs');
+export const { bindProof: hqBindProof } = await load(hqDir, 'hq/admission.mjs');
 export const { SOUL, DIGEST, hello } = hqHarness;
 export const schema = (rel) => JSON.parse(readFileSync(join(hqHarness.contracts, 'schemas', rel), 'utf8'));
 export const fixture = (rel) => JSON.parse(readFileSync(join(hqHarness.contracts, 'fixtures', rel), 'utf8'));

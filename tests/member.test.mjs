@@ -5,13 +5,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { connectMember, NotCommitted } from '../lib/member.mjs';
+import { BIND_CONTEXT, bindProof, connectMember, NotCommitted } from '../lib/member.mjs';
 import { readLines, writeLine } from '../lib/ndjson.mjs';
-import { BIN, hello, SOUL, startHQ } from './harness.mjs';
+import { BIN, DIGEST, hello, hqBindProof, SOUL, startHQ } from './harness.mjs';
 
 // An NDJSON server in HQ's framing. `handle(op, payload, socket)` returns
 // the result, throws { refusal } or { host_refusal }, or returns DROP to
@@ -57,14 +57,20 @@ async function world({ broker }) {
 }
 const RT1 = { runtime_id: 'rt_1', channel_binding: 'cb_1111111111111111', installation_epoch: 1, lease_generation: 1 };
 const RT2 = { runtime_id: 'rt_2', channel_binding: 'cb_2222222222222222', installation_epoch: 1, lease_generation: 2 };
+const NONCE = 'ab'.repeat(32);
 const INPUT = { task_id: 'task_17', expected_revision: 2, operation_id: 'complete:task_17', transition: 'completed', result_ref: 'artifact_42' };
 const RECEIPT = { contract: 'task/v1', operation_id: 'complete:task_17', task_id: 'task_17', outcome: 'committed', status: 'completed', revision: 3 };
 
 // A scripted broker: `script(kind, message, n)` where n counts commits.
 async function stubBroker(dir, script) {
-  const seen = { binds: [], commits: [], gets: 0 };
+  const seen = { binds: [], frames: [], commits: [], gets: 0 };
   const broker = await serve(dir, 'broker.sock', (kind, message) => {
-    if (kind === 'bind') { seen.binds.push(message.runtime_id); return { runtime_id: message.runtime_id }; }
+    if (kind === 'bind.challenge') return { runtime_id: message.runtime_id, nonce: NONCE, algorithm: 'hmac-sha256', context: BIND_CONTEXT };
+    if (kind === 'bind') {
+      seen.binds.push(message.runtime_id);
+      seen.frames.push(message);
+      return { runtime_id: message.runtime_id };
+    }
     if (kind === 'task.commit') { seen.commits.push(message); return script.commit(message, seen.commits.length); }
     if (kind === 'task.get') { seen.gets += 1; return script.get(message); }
     throw { host_refusal: { code: 'host.unknown_kind', explanation: kind } };
@@ -215,4 +221,94 @@ test('agent-bot-souls member <op> gives a harness that only runs commands the sa
     assert.deepEqual([broker.seen.commits[0].operation_id, broker.seen.commits[0].runtime_id, broker.seen.commits[0].contract], ['complete:task_17', 'rt_1', 'task/v1']);
     await assert.rejects(cli('route', JSON.stringify({ role: 'specialist', prompt: 'x' })), /souls\.unknown_op/, 'refusals reach the caller');
   } finally { await w.done(); await broker.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+// agent-bot-hq plan §9 row 16a.
+test('the bind proof is HQ\'s own, and the binding is never sent to the broker', async () => {
+  assert.equal(bindProof(RT1.channel_binding, NONCE, 'rt_1'), hqBindProof(RT1.channel_binding, NONCE, 'rt_1'));
+  const dir = mkdtempSync(join(tmpdir(), 'm-'));
+  const broker = await stubBroker(dir, { commit: () => RECEIPT, get: () => { throw new Error('no lookup needed'); } });
+  const w = await world({ broker: broker.path });
+  w.box.rt = RT1;
+  try {
+    const member = await connectMember(w.env);
+    await member.commit(INPUT);
+    assert.deepEqual(broker.seen.frames, [{ runtime_id: 'rt_1', proof: hqBindProof(RT1.channel_binding, NONCE, 'rt_1') }]);
+    await member.close();
+  } finally { await w.done(); await broker.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a challenge the member cannot answer is not answered, and nothing falls back to the binding', async () => {
+  for (const [name, challenge] of [
+    ['another algorithm', { runtime_id: 'rt_1', nonce: NONCE, algorithm: 'none', context: BIND_CONTEXT }],
+    ['another context', { runtime_id: 'rt_1', nonce: NONCE, algorithm: 'hmac-sha256', context: 'other/v1' }],
+    ['another runtime', { runtime_id: 'rt_2', nonce: NONCE, algorithm: 'hmac-sha256', context: BIND_CONTEXT }],
+    ['no nonce', { runtime_id: 'rt_1', algorithm: 'hmac-sha256', context: BIND_CONTEXT }],
+    ['a refusal', null],
+  ]) {
+    const dir = mkdtempSync(join(tmpdir(), 'm-'));
+    const frames = [];
+    const broker = await serve(dir, 'broker.sock', (kind, message) => {
+      frames.push([kind, message]);
+      if (kind === 'bind.challenge' && challenge) return challenge;
+      throw { host_refusal: { code: 'host.invalid_request', explanation: 'this HQ does not offer bind challenges' } };
+    });
+    const w = await world({ broker: broker.path });
+    w.box.rt = RT1;
+    try {
+      const member = await connectMember(w.env);
+      await assert.rejects(member.directives(), challenge ? /cannot answer/ : (e) => e.code === 'host.invalid_request', name);
+      assert.deepEqual(frames.map(([kind]) => kind), ['bind.challenge'], name);
+      assert.equal(JSON.stringify(frames).includes(RT1.channel_binding), false, name);
+      await member.close();
+    } finally { await w.done(); await broker.close(); rmSync(dir, { recursive: true, force: true }); }
+  }
+});
+
+test('against HQ: a member in its own account binds on its own endpoint, and nowhere else (T01)', async () => {
+  // Two endpoint directories stand in for two member accounts; HQ's own CI
+  // proves the kernel side on real accounts.
+  const dir = mkdtempSync(join(tmpdir(), 'm-'));
+  chmodSync(dir, 0o755);
+  const uids = { hqm_a: 61001, hqm_b: 61002 };
+  const gids = {};
+  for (const account of Object.keys(uids)) {
+    mkdirSync(join(dir, account));
+    chmodSync(join(dir, account), 0o2750);
+    gids[account] = statSync(join(dir, account)).gid;
+  }
+  const t = await startHQ({
+    platform: 'linux',
+    accounts: (name) => ({ uid: uids[name], gid: gids[name], groupMembers: [] }),
+    config: { acceptedDefinitions: { [SOUL]: [DIGEST] }, members: { dir, accounts: { [SOUL]: { m_lead: 'hqm_a', m_spec: 'hqm_b' } } } },
+  });
+  // The entry point reports the shared socket, as it does today.
+  const w = await world({ broker: t.hq.paths.broker });
+  try {
+    const entry = await t.entry();
+    const r = (await entry.request('Hello', hello())).result;
+    const a = r.admitted_runtimes.find((x) => x.role === 'lead');
+    w.box.rt = { runtime_id: a.runtime_id, channel_binding: a.channel_binding, installation_epoch: r.installation_epoch, lease_generation: r.lease_generation };
+    const owner = await t.owner();
+    const taskId = (await owner.request('tasks.offer', { operation_id: 'offer_1', objective: 'x', done_criteria: 'y', accountable_soul: SOUL })).result.task_id;
+    const endpoint = (account) => t.status.hq.sockets.members.find((m) => m.account === account).path;
+    const mismatch = (e) => e.code === 'caller_mismatch';
+
+    // From the shared socket, and from another member's endpoint: refused.
+    const shared = await connectMember(w.env);
+    await assert.rejects(shared.directives(), mismatch);
+    await shared.close();
+    const other = await connectMember({ ...w.env, AGENT_BOT_SOULS_BROKER: endpoint('hqm_b') });
+    await assert.rejects(other.directives(), mismatch);
+    await other.close();
+
+    const member = await connectMember({ ...w.env, AGENT_BOT_SOULS_BROKER: endpoint('hqm_a') });
+    const accepted = await member.commit({ task_id: taskId, expected_revision: 0, operation_id: 'accept:1', transition: 'accepted' });
+    assert.deepEqual([accepted.outcome, accepted.status], ['committed', 'accepted']);
+    await member.close();
+
+    const binds = t.hq.core.receipts.filter((x) => x.kind === 'hq.bind');
+    assert.deepEqual(binds.map((x) => [x.caller_account, x.proof]), [['hqm_a', 'hmac-sha256']]);
+    assert.equal(JSON.stringify(t.hq.core.receipts).includes(a.channel_binding), false);
+  } finally { await w.done(); await t.done(); rmSync(dir, { recursive: true, force: true }); }
 });
