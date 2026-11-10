@@ -31,11 +31,19 @@ It holds no keys and decides no grant. It does not commit to tasks. A member
 commits for itself: it binds its own connection to HQ's `broker.sock` with
 the runtime HQ admitted it as, and HQ checks every request.
 
-The entry point passes each member that runtime and its channel binding. In
-the cooperative profile the binding is a bearer secret inside the Soul, so a
-member that reads another member's binding can speak for it. HQ reports
-`managed-cooperative` for that reason. The protected profile (plan row 16)
-replaces it with caller-bound handles.
+The entry point passes each member that runtime and its channel binding. The
+member never sends the binding to the broker. It asks HQ for a challenge and
+answers with a proof keyed by the binding (plan row 16a). If HQ offers no
+challenge the member can answer, the bind fails; nothing falls back to
+sending the binding.
+
+In the cooperative profile the binding is still a bearer secret inside the
+Soul, so a member that reads another member's binding can speak for it. HQ
+reports `managed-cooperative` for that reason. Where the owner gives a member
+its own OS account, HQ gives that account its own broker endpoint and accepts
+the member's runtime from that endpoint alone. Whoever starts the member in
+that account names the endpoint in `AGENT_BOT_SOULS_BROKER`. The entry point
+does not start members in other accounts yet (plan row 16b).
 
 It never approves a permission request from an adapter. It answers
 `cancelled`, because approvals are HQ's records of the owner's decisions.
