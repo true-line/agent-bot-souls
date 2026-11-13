@@ -4,7 +4,7 @@
 // commitment. Then the recovery ladder, with real member processes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
 import { connectHq } from '../lib/hq-client.mjs';
@@ -247,6 +247,26 @@ test('a fail-over route that may not receive the task\'s data is not used: the w
     // The task is still running in HQ, with the handoff note for whoever resumes it.
     assert.equal((await t.task(taskId)).task.status, 'running');
     assert.deepEqual(handoffs(t.contents).map((n) => [n.task_id, n.disclosure_restrictions]), [[taskId, ['confidential']]]);
+  } finally { await t.done(); }
+});
+
+test('a corrupted restricted handoff cannot become permission to send context to a fallback', async () => {
+  const t = await setup({ soul: understudy([]) });
+  try {
+    await t.soul.prompt('No task is waiting yet.');
+    const notes = join(t.contents, 'comms', 'notes');
+    mkdirSync(notes, { recursive: true });
+    writeFileSync(join(notes, 'restricted.json'), JSON.stringify({
+      note_id: 'note_restricted', type: 'handoff', member_id: 'm_lead', runtime_id: 'rt_lead',
+      timestamp: '2026-11-09T00:00:00Z', body: 'Restricted context', provenance: ['member'],
+      disclosure_restrictions: ['confidential'], unexpected: 'corrupted after storage',
+    }));
+    await t.offer({ restrictions: { labels: ['confidential'] } });
+    await assert.rejects(t.soul.prompt('Continue the task.'));
+    assert.throws(() => handoffs(t.contents), /handoff restrictions are unavailable/);
+    assert.equal(t.soul.status().members.find((m) => m.member_id === 'm_spec').adapter_id, 'fake-specialist');
+    assert.equal(t.receipts('hq.admission').length, 1, 'no fallback was admitted');
+    assert.deepEqual(recoveries(t), [], 'corrupt notes were not converted into an unrestricted fail-over');
   } finally { await t.done(); }
 });
 

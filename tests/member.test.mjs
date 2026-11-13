@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BIND_CONTEXT, bindProof, connectMember, NotCommitted } from '../lib/member.mjs';
 import { readLines, writeLine } from '../lib/ndjson.mjs';
-import { BIN, DIGEST, hello, hqBindProof, SOUL, startHQ } from './harness.mjs';
+import { BIN, DIGEST, fixture, hello, hqBindProof, SOUL, startHQ } from './harness.mjs';
 
 // An NDJSON server in HQ's framing. `handle(op, payload, socket)` returns
 // the result, throws { refusal } or { host_refusal }, or returns DROP to
@@ -60,6 +60,9 @@ const RT2 = { runtime_id: 'rt_2', channel_binding: 'cb_2222222222222222', instal
 const NONCE = 'ab'.repeat(32);
 const INPUT = { task_id: 'task_17', expected_revision: 2, operation_id: 'complete:task_17', transition: 'completed', result_ref: 'artifact_42' };
 const RECEIPT = { contract: 'task/v1', operation_id: 'complete:task_17', task_id: 'task_17', outcome: 'committed', status: 'completed', revision: 3 };
+// Scripted recovery replies still cross the production contract boundary.
+// Keep the full pinned task record; vary only the state being reconciled.
+const taskRecord = (state) => ({ ...fixture('positive/task-record.offered.json').input, ...state });
 
 // A scripted broker: `script(kind, message, n)` where n counts commits.
 async function stubBroker(dir, script) {
@@ -145,10 +148,10 @@ test('a lost reply on the same runtime: the identical request is sent again and 
 
 test('a lost reply and a new runtime: the record decides, and the operation is never sent again', async () => {
   for (const [name, record, expected] of [
-    ['it landed', { task: { task_id: 'task_17', status: 'completed', revision: 3 }, proposals: [] }, { outcome: 'committed', status: 'completed', revision: 3, reconciled: true }],
-    ['it did not land', { task: { task_id: 'task_17', status: 'running', revision: 2 }, proposals: [] }, NotCommitted],
-    ['another commit landed instead', { task: { task_id: 'task_17', status: 'failed', revision: 3 }, proposals: [] }, NotCommitted],
-    ['it was recorded as a proposal', { task: { task_id: 'task_17', status: 'running', revision: 2 }, proposals: [{ proposal_id: 'prop_9', operation_id: 'complete:task_17' }] }, { outcome: 'proposal', proposal_id: 'prop_9', reconciled: true }],
+    ['it landed', { task: taskRecord({ task_id: 'task_17', status: 'completed', revision: 3 }), proposals: [] }, { outcome: 'committed', status: 'completed', revision: 3, reconciled: true }],
+    ['it did not land', { task: taskRecord({ task_id: 'task_17', status: 'running', revision: 2 }), proposals: [] }, NotCommitted],
+    ['another commit landed instead', { task: taskRecord({ task_id: 'task_17', status: 'failed', revision: 3 }), proposals: [] }, NotCommitted],
+    ['it was recorded as a proposal', { task: taskRecord({ task_id: 'task_17', status: 'running', revision: 2 }), proposals: [{ proposal_id: 'prop_9', operation_id: 'complete:task_17' }] }, { outcome: 'proposal', proposal_id: 'prop_9', reconciled: true }],
   ]) {
     const dir = mkdtempSync(join(tmpdir(), 'b-'));
     const w = await world({ broker: join(dir, 'broker.sock') });
@@ -207,7 +210,7 @@ test('any other refusal is the answer: nothing is retried', async () => {
 
 test('agent-bot-souls member <op> gives a harness that only runs commands the same operations', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'b-'));
-  const broker = await stubBroker(dir, { commit: () => RECEIPT, get: () => ({ task: { task_id: 'task_17', status: 'running', revision: 2 }, proposals: [] }) });
+  const broker = await stubBroker(dir, { commit: () => RECEIPT, get: () => ({ task: taskRecord({ task_id: 'task_17', status: 'running', revision: 2 }), proposals: [] }) });
   const w = await world({ broker: broker.path });
   const cli = (...argv) => new Promise((resolve, reject) => {
     execFile(process.execPath, [BIN, 'member', ...argv], { env: { PATH: process.env.PATH, ...w.env } }, (err, stdout, stderr) => (err ? reject(new Error(stderr)) : resolve(JSON.parse(stdout))));

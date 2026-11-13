@@ -89,6 +89,39 @@ operation ID. The same request is sent again while the runtime is the same,
 which returns HQ's stored receipt. After a new admission the task record is
 read back, and it says whether the commitment landed.
 
+## Contract validation
+
+The runtime consumes `soul-contracts` v0.4.1 through the commit and
+`sha256-manifest-v1` digest in `governance/soul-contracts.json`. The explicit
+preparation step is documented in the [README](../README.md). Schemas and
+fixtures stay in that external dependency; none is copied into this
+repository. The small SDK parsing, schema and canonicalization modules in
+`lib/vendor/agent-bot-sdk/` carry their source commit, byte hashes and MIT
+notice. Tests compare their bytes with the same HQ revision the runtime's
+integration tests use.
+
+The production clients validate outgoing Hello, Ready/Lease and task
+commitments, incoming admission, Equip, task records, directives and typed
+refusals. Admission replies must echo the Hello request and select versions
+the runtime both implements and offered. HQ and member sockets reject
+duplicate JSON keys, malformed envelopes and replies with no pending request.
+Notes are checked against the pinned typed-note schema before writing and
+after reading. A corrupt or unreadable stored note makes its handoff
+restrictions unavailable; it is never silently discarded to allow fail-over.
+
+`tests/contracts.test.mjs` runs every shared positive and negative fixture
+through the runtime codec for its schema/parse verdict (33 positives and 55
+negatives across 19 schemas), checks their byte pins and canonicalization
+vectors, and exercises the two T14 version/capability refusals. This is
+component evidence for the platform's
+[Stage 0 gate](https://github.com/true-line/agent-bot-platform/blob/main/docs/10-program/roadmap.md),
+not a `soul-conformance` result. The schema-valid stale epoch, unaccepted
+definition, insufficient profile and expired approval/frame fixtures still
+need authority or time context: their semantic errors remain HQ's or the
+broker's responsibility. They are not reported as runtime authorization
+checks. Likewise, the local request/reply envelope and Ready/Lease reply
+remain HQ framing until soul-contracts specifies them (soul-contracts #34).
+
 ## The recovery ladder
 
 The entry point classifies a failure before it acts.
