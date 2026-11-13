@@ -19,7 +19,10 @@ async function corruptReplies(t, hq, alter) {
     const upstream = connect(join(hq.home, 'admission.sock'));
     sockets.add(upstream); sockets.add(downstream);
     downstream.pipe(upstream);
-    readLines(upstream, (line) => downstream.write(`${alter(JSON.parse(line))}\n`), () => downstream.destroy());
+    readLines(upstream, (line) => {
+      const text = alter(JSON.parse(line));
+      if (text !== undefined) downstream.write(Buffer.isBuffer(text) ? Buffer.concat([text, Buffer.from('\n')]) : `${text}\n`);
+    }, () => downstream.destroy());
     downstream.on('error', () => upstream.destroy());
     upstream.on('error', () => downstream.destroy());
     downstream.on('close', () => { sockets.delete(downstream); upstream.destroy(); });
@@ -51,6 +54,47 @@ test('the real runtime rejects corrupted HQ admission before exposing it to a me
           client.request('Hello', { ...hello, request_id: `req_${name.replaceAll(' ', '_')}`, requested_profile: 'managed-cooperative' }),
           new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('malformed reply left its request hanging')), 2000); }),
         ]), refuses);
+      } finally { clearTimeout(timeout); }
+    });
+  }
+});
+
+test('a poisoned HQ reply fails parallel waiters, ignores later same-packet replies and refuses reuse', async (t) => {
+  const hq = await startHQ();
+  t.after(() => hq.done());
+  for (const [name, corrupt, original] of [
+    ['invalid contract', (reply) => JSON.stringify({ ...reply, result: { ...reply.result, unexpected: true } }), (e) => e instanceof ContractError],
+    ['invalid envelope', (reply) => JSON.stringify({ id: reply.id, ok: true }), (e) => e.transport === true],
+    ['invalid JSON', (reply) => `{"ok":false,${JSON.stringify(reply).slice(1)}`, (e) => e.transport === true],
+    ['invalid UTF-8', (reply) => {
+      const [before, after] = JSON.stringify({ ...reply, result: { ...reply.result, warnings: ['BAD_BYTE'] } }).split('BAD_BYTE');
+      return Buffer.concat([Buffer.from(before), Buffer.from([0x80]), Buffer.from(after)]);
+    }, (e) => e.transport === true],
+  ]) {
+    await t.test(name, async (sub) => {
+      const replies = [];
+      const client = await corruptReplies(sub, hq, (reply) => {
+        replies.push(reply);
+        if (replies.length < 2) return undefined;
+        return Buffer.concat([Buffer.from(corrupt(replies[0])), Buffer.from(`\n${JSON.stringify(replies[1])}`)]);
+      });
+      sub.after(() => client.close());
+      const hello = fixture('positive/hello.first-start.json').input;
+      let timeout;
+      try {
+        const results = await Promise.race([
+          Promise.allSettled([
+            client.request('Hello', { ...hello, request_id: `req_first_${name.replaceAll(' ', '_')}`, requested_profile: 'managed-cooperative' }),
+            client.request('Hello', { ...hello, request_id: `req_second_${name.replaceAll(' ', '_')}`, requested_profile: 'managed-cooperative' }),
+          ]),
+          new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('poisoned connection left a waiter hanging')), 2000); }),
+        ]);
+        assert.equal(results[0].status, 'rejected');
+        assert.ok(original(results[0].reason), 'the first failure keeps its original reason');
+        assert.equal(results[1].status, 'rejected', 'the valid second frame in the same packet is unusable');
+        assert.equal(results[1].reason.transport, true);
+        assert.equal(client.closed, true);
+        await assert.rejects(client.request('status'), (error) => error.transport === true);
       } finally { clearTimeout(timeout); }
     });
   }
