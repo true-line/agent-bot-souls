@@ -6,6 +6,7 @@
   "type": "module",
   "license": "MIT",
   "scripts": {
+    "prepare:contracts": "node scripts/prepare-contracts.mjs",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs"
   },
   "engines": {
@@ -17,6 +18,8 @@
   "files": [
     "bin",
     "lib",
+    "governance/soul-contracts.json",
+    "scripts/prepare-contracts.mjs",
     "LICENSE",
     "README.md"
   ]

@@ -20,4 +20,5 @@ jobs:
       - name: test
         run: |
           node --version
+          npm run prepare:contracts
           npm test
