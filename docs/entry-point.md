@@ -89,6 +89,57 @@ operation ID. The same request is sent again while the runtime is the same,
 which returns HQ's stored receipt. After a new admission the task record is
 read back, and it says whether the commitment landed.
 
+## Bound member queries
+
+`connectMember(env).queries` is the supported SDK capability for plugin
+queries over the member's existing authenticated broker connection:
+
+```js
+await member.queries.request('notices.peek', (freshness) => ({
+  // Build the operation's validated shared record here.
+  ...freshness,
+}), { replay: 'read-once' });
+```
+
+The builder must be synchronous. It receives a frozen copy of exactly
+`installation_epoch` and `lease_generation` for the concrete connection that
+will send its result. It receives no runtime record, channel binding, token,
+remote harness or repository policy. The operation's own client still
+validates its released shared query/result contract; the generic port does
+not replace that boundary.
+
+The SDK's replay policy and driver contract live in
+[HQ's member-query port](https://github.com/true-line/agent-bot-hq/blob/f3c39d2a703085c14bc09f8f0042d048f30525dc/docs/hq-member-query-port.md).
+The default is `never`. Only the fixed read kinds `task.get`,
+`task.directives` and `notices.peek` can use `read-once`. Recovery captures
+one replacement binding and rebuilds the payload once from its freshness.
+Consume-one, task commitments and unknown kinds never gain replay through
+that option. Existing `member.commit()` keeps its separate operation-ID
+reconciliation behavior.
+
+The Soul runtime owns this connection lifecycle. Concurrent captures share
+one bind; a new pair is published only after challenge validation and bind
+confirmation. A failed replacement is not published, and recovering a late
+failure cannot tear down a newer pair. The owner accepts freshness recovery
+only for validated shared refusals, or its transport's connection failure;
+a host-code string is not a shared refusal. A failed destructive call is never
+reconnected or resent inside that call; a later explicit capture may repair
+its stale pair before building another request. Closing the member aborts pending
+binding work and prevents retained query capabilities from opening again.
+
+The SDK module and existing codec files are exact copies of the reviewed HQ
+commit in `governance/pins.json`, with individual byte hashes and the license
+in `lib/vendor/agent-bot-sdk/source.json`. This follows existing commit-based
+SDK provenance; the shared contract release remains independently verified.
+
+This provider does not register a notice consumer, publish a new notice schema,
+start an MCP server or activate a queue. Actual identity MCP composition is
+still [HQ #131](https://github.com/true-line/agent-bot-hq/issues/131), and legacy
+notice acceptance remains [HQ #13](https://github.com/true-line/agent-bot-hq/issues/13).
+The transport tests use real pinned HQ admission/broker/storage plus a test-only
+query handler and a local connection-fault proxy; they do not claim released
+notice-consumer or MCP integration evidence.
+
 ## Contract validation
 
 The runtime consumes `soul-contracts` v0.4.1 through the commit and
