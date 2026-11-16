@@ -117,20 +117,30 @@ Consume-one, task commitments and unknown kinds never gain replay through
 that option. Existing `member.commit()` keeps its separate operation-ID
 reconciliation behavior.
 
-The Soul runtime owns this connection lifecycle. Concurrent captures share
-one bind; a new pair is published only after challenge validation and bind
-confirmation. A failed replacement is not published, and recovering a late
-failure cannot tear down a newer pair. The owner accepts freshness recovery
-only for validated shared refusals, or its transport's connection failure;
-a host-code string is not a shared refusal. A failed destructive call is never
-reconnected or resent inside that call; a later explicit capture may repair
-its stale pair before building another request. Closing the member aborts pending
-binding work and prevents retained query capabilities from opening again.
+The Soul runtime adapts its existing member bootstrap environment to the
+[shared SDK member session](https://github.com/true-line/agent-bot-hq/blob/69505d72ba30dd6c8129397baadb3b0b3397fbbd/docs/hq-member-bootstrap-client.md).
+That is the single implementation of local socket framing, challenge/HMAC,
+capture/reconnect and session cleanup. `lib/hq-client.mjs` retains only the
+runtime's verified-contract default, `lib/ndjson.mjs` re-exports the shared
+line codec, and `lib/member.mjs` keeps the Soul-specific task workflow.
 
-The SDK module and existing codec files are exact copies of the reviewed HQ
-commit in `governance/pins.json`, with individual byte hashes and the license
-in `lib/vendor/agent-bot-sdk/source.json`. This follows existing commit-based
-SDK provenance; the shared contract release remains independently verified.
+Concurrent captures share one completed binding. Freshness recovery accepts
+only validated shared refusals or a transport failure; it cannot tear down a
+newer pair. Consume-one is never replayed, and a later explicit capture may
+repair a stale pair. Malformed member hello closes its entry connection before
+runtime lookup. Contract callbacks must validate synchronously; a returned
+promise refuses before sending or accepting a record.
+
+Existing `member.commit()` uses the private SDK owner facade's
+`runtimeFor`/`requestOnce` so its operation-ID reconciliation remains separate
+from generic query invalidation. Public `runtime()` still returns a fresh,
+redacted metadata object. Token issuance, renewal and replacement remain with
+the same runtime owner, and authority checks remain at HQ.
+
+The exact SDK client/session/codec files are pinned to the reviewed HQ commit
+in `governance/pins.json`, with per-file hashes and the license in
+`lib/vendor/agent-bot-sdk/source.json`. This follows existing commit-based SDK
+provenance; the shared contract release remains independently verified.
 
 This provider does not register a notice consumer, publish a new notice schema,
 start an MCP server or activate a queue. Actual identity MCP composition is
@@ -146,7 +156,7 @@ The runtime consumes `soul-contracts` v0.4.1 through the commit and
 `sha256-manifest-v1` digest in `governance/soul-contracts.json`. The explicit
 preparation step is documented in the [README](../README.md). Schemas and
 fixtures stay in that external dependency; none is copied into this
-repository. The small SDK parsing, schema and canonicalization modules in
+repository. The SDK client, session, parsing, schema and canonicalization modules in
 `lib/vendor/agent-bot-sdk/` carry their source commit, byte hashes and MIT
 notice. Tests compare their bytes with the same HQ revision the runtime's
 integration tests use.
