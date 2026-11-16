@@ -5,13 +5,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BIND_CONTEXT, bindProof, connectMember, NotCommitted } from '../lib/member.mjs';
 import { readLines, writeLine } from '../lib/ndjson.mjs';
-import { BIN, DIGEST, fixture, hello, hqBindProof, SOUL, startHQ } from './harness.mjs';
+import { BIN, DIGEST, fixture, hello, helloOn, harnessLayout, fakeSudo, hqBindProof, SOUL, startHQ } from './harness.mjs';
 
 // An NDJSON server in HQ's framing. `handle(op, payload, socket)` returns
 // the result, throws { refusal } or { host_refusal }, or returns DROP to
@@ -268,33 +268,24 @@ test('a challenge the member cannot answer is not answered, and nothing falls ba
   }
 });
 
-test('against HQ: a member in its own account binds on its own endpoint, and nowhere else (T01)', async () => {
-  // Two endpoint directories stand in for two member accounts; HQ's own CI
-  // proves the kernel side on real accounts.
-  const dir = mkdtempSync(join(tmpdir(), 'm-'));
-  chmodSync(dir, 0o755);
-  const uids = { hqm_a: 61001, hqm_b: 61002 };
-  const gids = {};
-  for (const account of Object.keys(uids)) {
-    mkdirSync(join(dir, account));
-    chmodSync(join(dir, account), 0o2750);
-    gids[account] = statSync(join(dir, account)).gid;
-  }
+test('against HQ: an agent binds only on its harness account endpoint (T01)', async () => {
+  // The current HQ API maps adapters to harness accounts. Its fixture also
+  // supplies the verified account homes required by the launcher.
+  const layout = harnessLayout();
   const t = await startHQ({
-    platform: 'linux',
-    accounts: (name) => ({ uid: uids[name], gid: gids[name], groupMembers: [] }),
-    config: { acceptedDefinitions: { [SOUL]: [DIGEST] }, members: { dir, accounts: { [SOUL]: { m_lead: 'hqm_a', m_spec: 'hqm_b' } } } },
+    platform: 'linux', accounts: layout.resolve, harnessLstat: layout.lstat, launch: { spawn: fakeSudo().spawn },
+    config: { acceptedDefinitions: { [SOUL]: [DIGEST] }, harnesses: { dir: layout.dir, accounts: { lead: 'hqm_a', spec: 'hqm_b' } } },
   });
   // The entry point reports the shared socket, as it does today.
   const w = await world({ broker: t.hq.paths.broker });
   try {
     const entry = await t.entry();
-    const r = (await entry.request('Hello', hello())).result;
+    const r = (await entry.request('Hello', helloOn('lead', 'spec'))).result;
     const a = r.admitted_runtimes.find((x) => x.role === 'lead');
     w.box.rt = { runtime_id: a.runtime_id, channel_binding: a.channel_binding, installation_epoch: r.installation_epoch, lease_generation: r.lease_generation };
     const owner = await t.owner();
     const taskId = (await owner.request('tasks.offer', { operation_id: 'offer_1', objective: 'x', done_criteria: 'y', accountable_soul: SOUL })).result.task_id;
-    const endpoint = (account) => t.status.hq.sockets.members.find((m) => m.account === account).path;
+    const endpoint = (account) => t.status.hq.sockets.harnesses.find((m) => m.account === account).path;
     const mismatch = (e) => e.code === 'caller_mismatch';
 
     // From the shared socket, and from another member's endpoint: refused.
@@ -313,5 +304,5 @@ test('against HQ: a member in its own account binds on its own endpoint, and now
     const binds = t.hq.core.receipts.filter((x) => x.kind === 'hq.bind');
     assert.deepEqual(binds.map((x) => [x.caller_account, x.proof]), [['hqm_a', 'hmac-sha256']]);
     assert.equal(JSON.stringify(t.hq.core.receipts).includes(a.channel_binding), false);
-  } finally { await w.done(); await t.done(); rmSync(dir, { recursive: true, force: true }); }
+  } finally { await w.done(); await t.done(); layout.remove(); }
 });

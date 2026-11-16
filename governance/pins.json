@@ -2,7 +2,7 @@
   "schema_version": 1,
   "agent-bot-hq": {
     "repository": "https://github.com/true-line/agent-bot-hq",
-    "commit": "318c72d2f58de14ef0889e1214fbf7bc42ad7add"
+    "commit": "f3c39d2a703085c14bc09f8f0042d048f30525dc"
   },
   "agent-bot-comms": {
     "repository": "https://github.com/true-line/agent-bot-comms",
