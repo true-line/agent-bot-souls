@@ -87,14 +87,25 @@ async function world(t, { beforeBind, beforeQuery, reply } = {}) {
       else if (output !== undefined) writeLine(client, output);
     });
   });
-  const connect = async () => {
-    const member = await connectMember({ AGENT_BOT_SOULS_SOCKET: entry.path, AGENT_BOT_SOULS_MEMBER_TOKEN: 'MEMBER_TOKEN_CANARY' });
+  const connect = async (overrides = {}) => {
+    const member = await connectMember({ AGENT_BOT_SOULS_SOCKET: entry.path, AGENT_BOT_SOULS_MEMBER_TOKEN: 'MEMBER_TOKEN_CANARY', ...overrides });
     members.push(member); return member;
   };
   return { hq, state, frames, connect, admit };
 }
 
 const build = (freshness) => ({ ...freshness });
+
+test('real HQ: an empty optional broker override uses the authenticated runtime endpoint', async (t) => {
+  const w = await world(t);
+  const member = await w.connect({ AGENT_BOT_SOULS_BROKER: '' });
+  const result = await member.queries.request('notices.peek', build);
+  assert.equal(result.runtime_id, w.state.runtime.runtime_id);
+  assert.equal(w.state.binds, 1);
+  assert.equal(w.state.asked, 1);
+  assert.equal(w.state.received.length, 1);
+  assert.equal(w.state.received[0].runtime_id, w.state.runtime.runtime_id);
+});
 
 test('real HQ: concurrent first captures share one completed bind and expose only the SDK capability', async (t) => {
   const entered = deferred(), release = deferred();

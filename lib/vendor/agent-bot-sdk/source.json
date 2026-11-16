@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/true-line/agent-bot-hq",
-  "commit": "f3c39d2a703085c14bc09f8f0042d048f30525dc",
+  "commit": "69505d72ba30dd6c8129397baadb3b0b3397fbbd",
   "files": {
     "sdk/errors.mjs": "fde3ecf83405173b60a105aa88a7deb1992c09de8743253f3aeee8c6a7eb6177",
     "sdk/wire/canonical-json.mjs": "331ffdcb00e287552b38b215a0c5dc19340b86d6503863c30d3785bdddc0580b",
@@ -8,6 +8,10 @@
     "sdk/wire/strict-json.mjs": "2708f4eca2ab24ff761bd216f53d3647fb66c3b196730a2574eb7560c0db4e9e",
     "sdk/wire/versions.mjs": "b5528e5e25ebe6f5ed13ca54360e4792e2d662ecf59e1161ae6a1475514f5704",
     "LICENSE": "9992492a651a77038f1a616beb4b4cc9eb8513679991e67912963df719057f61",
-    "sdk/member-query.mjs": "6466d5b41b2678424cba499235664fb0fdb413fcead71da1ff4286d1e4f208d4"
+    "sdk/member-query.mjs": "6466d5b41b2678424cba499235664fb0fdb413fcead71da1ff4286d1e4f208d4",
+    "sdk/local-socket-client.mjs": "d43bebac880d4c0fc280afbb3724cbb45f069f05b66544319773057fea8009fe",
+    "sdk/local-socket-lines.mjs": "96f15318ba4591279057af5540c69e74ecee65455393c10eb153d82a770272e2",
+    "sdk/member-session.mjs": "427074a803ebcdda5dcd49c042b22b9ae7cc97e71bcfb61c10d709ee0853a98b",
+    "sdk/member-client.mjs": "d026097daa717f09933f3f4e632928bdc8372bab7d56b75fb86cfd0b278a47e1"
   }
 }
