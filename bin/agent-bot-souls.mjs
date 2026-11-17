@@ -2,13 +2,17 @@
 // agent-bot-souls: the Soul runtime's executable (platform PDR-0037),
 // reached through the shim as `agent-bot souls …`.
 //
-//   agent-bot-souls run  --soul DIR [--hq-home DIR]   the ACP front door, on stdio
-//   agent-bot-souls chat --soul DIR [--hq-home DIR]   a terminal chat with the Soul
+//   agent-bot-souls run  --soul DIR [--hq-home DIR] [--standalone]   the ACP front door, on stdio
+//   agent-bot-souls chat --soul DIR [--hq-home DIR] [--standalone]   a terminal chat with the Soul
 //   agent-bot-souls member <op> [JSON]                a member's requests, from inside a member
 //   agent-bot-souls fake-adapter                      the fake ACP adapter (testing and demos)
 //
 // DIR for --soul is the package directory (the one that holds Contents/).
 // --hq-home is HQ's state directory: $AGENT_BOT_HQ_HOME, else ~/.agent-bot-hq.
+// --standalone runs the Soul without HQ when HQ is not running, as an
+// unmanaged Soul (agent-bot-souls#4). It is given per run, never read from a
+// file or the environment, so no run drops to standalone unless the person
+// starting it asked that time. With HQ running it is ignored, and said so.
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -18,8 +22,8 @@ import { chat, serveAcp } from '../lib/front-door.mjs';
 import { connectMember } from '../lib/member.mjs';
 
 const USAGE = `usage:
-  agent-bot-souls run  --soul DIR [--hq-home DIR]
-  agent-bot-souls chat --soul DIR [--hq-home DIR]
+  agent-bot-souls run  --soul DIR [--hq-home DIR] [--standalone]
+  agent-bot-souls chat --soul DIR [--hq-home DIR] [--standalone]
   agent-bot-souls member <runtime|directives|handoffs|get|commit|route|note> [JSON]
   agent-bot-souls fake-adapter
   agent-bot-souls --version`;
@@ -36,11 +40,12 @@ const MEMBER_OPS = {
 
 function options(argv) {
   const out = {};
+  let standalone = false;
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--soul' || argv[i] === '--hq-home') { out[argv[i].slice(2)] = argv[i + 1]; i += 1; } else throw new Error(`unknown argument ${argv[i]}`);
+    if (argv[i] === '--soul' || argv[i] === '--hq-home') { out[argv[i].slice(2)] = argv[i + 1]; i += 1; } else if (argv[i] === '--standalone') standalone = true; else throw new Error(`unknown argument ${argv[i]}`);
   }
   if (!out.soul) throw new Error('--soul DIR is required');
-  return { root: out.soul, hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq') };
+  return { root: out.soul, hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq'), standalone };
 }
 
 async function main([cmd, ...rest]) {

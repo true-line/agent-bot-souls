@@ -212,6 +212,49 @@ specialist it produces an artifact and proposes. It exists so the entry
 point can be run and tested before a real adapter does. Real adapters come
 from [soul-adapters](https://github.com/true-line/soul-adapters).
 
+## Without HQ
+
+The rule is the owner's ([#4](https://github.com/true-line/agent-bot-souls/issues/4),
+platform [PDR-0055](https://github.com/true-line/agent-bot-platform/blob/main/docs/04-decisions/PDR-0055-a-soul-is-managed-when-hq-starts-it.md)).
+HQ is there when it is on the system and running, which the entry point
+reads as: `<hq-home>/admission.sock` answers.
+
+| HQ | `--standalone` not given | `--standalone` given |
+| --- | --- | --- |
+| Running | The HQ flow | The HQ flow; the `standalone-ignored` event says the switch was ignored |
+| Installed (`<hq-home>` exists), not running | Stops: HQ is installed and not running | Runs unmanaged |
+| Not installed | Stops: HQ is not installed | Runs unmanaged |
+
+The message names the case it found and the way to run without HQ. Any
+other failure to reach the socket, and an HQ that answers and then refuses
+or fails, is an error: nothing drops to standalone on its own.
+
+`--standalone` is given per run, on `run` and `chat`. There is no settings
+file and no environment variable for it. A file under `Contents/host/`
+would travel with the package on a move or fork, and a file or an exported
+variable outlives the run, so when HQ later stopped on that host the Soul
+would run without it with nobody choosing that. That is the silent
+downgrade R8 rules out and RISK-007 watches.
+
+A standalone run is an unmanaged Soul. Its status reports profile
+`standalone-unenforced`, `hq` as `not-installed` or `not-running`, no
+installation epoch or lease generation, and these warnings:
+
+- the owner has not accepted the definition digest;
+- there are no brokered credentials: each harness uses the sign-in its
+  account already has;
+- there are no receipts, budgets or task records;
+- there is no separation between members: all run in the account that
+  started the entry point.
+
+It sends no Hello and has no admission result; that record is HQ's alone.
+The member operations that go to the entry point (`route`, `note`,
+`handoffs`) work. `runtime` is refused with `souls.unmanaged`, so the
+broker operations (`directives`, `get`, `commit`) fail with that code. A
+crash is restarted on the usual backoff without an admission. An
+authentication failure has no HQ to re-equip the member, so it is the
+owner's decision at once. The lead's brief says the Soul runs unmanaged.
+
 ## Not built yet
 
 - `Brief` as an HQ operation. soul-contracts has no schema for it, so the
