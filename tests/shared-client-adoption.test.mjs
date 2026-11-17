@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadContracts } from '../lib/contracts.mjs';
-import { connectHq } from '../lib/hq-client.mjs';
+import { attachHq, connectHq } from '../lib/hq-client.mjs';
 import { connectMember } from '../lib/member.mjs';
 import { readLines, writeLine } from '../lib/ndjson.mjs';
 import { fixture, SOUL, startHQ } from './harness.mjs';
@@ -68,4 +68,47 @@ test('adopted local client refuses asynchronous admission validation on the real
   await assert.rejects(client.request('Hello', { ...fixture('positive/hello.first-start.json').input, request_id: 'shared_async_validation' }), /validation must be synchronous/);
   assert.equal(client.closed, true, 'reply rejection poisons the connection before reuse');
   await assert.rejects(client.request('status'), (error) => error.transport === true);
+});
+
+test('launch attach preserves adapter bytes that share the HQ reply read', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'launch-attach-'));
+  const path = join(dir, 'admission.sock');
+  const launchId = `ln_${'a1'.repeat(12)}`;
+  const server = createServer((socket) => {
+    readLines(socket, (line) => {
+      const request = JSON.parse(line);
+      socket.write(`${JSON.stringify({ id: request.id, ok: true, result: { launch_id: launchId } })}\n${JSON.stringify({ jsonrpc: '2.0', id: 7, result: { ready: true } })}\n`);
+    });
+  });
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(path, resolve); });
+  t.after(async () => { await new Promise((resolve) => server.close(resolve)); rmSync(dir, { recursive: true, force: true }); });
+
+  const stream = await attachHq(path, { launch_id: launchId, attach: 'b2'.repeat(32) });
+  const line = new Promise((resolve) => readLines(stream, resolve));
+  stream.resume();
+  assert.deepEqual(JSON.parse(await line), { jsonrpc: '2.0', id: 7, result: { ready: true } });
+  stream.destroy();
+});
+
+test('launch attach rejects malformed host and shared refusals as contract failures', async () => {
+  const contracts = loadContracts();
+  const replies = [
+    { id: 1, ok: false, host_refusal: { code: 'host.launch_unavailable' } },
+    { id: 1, ok: false, refusal: { error: 'lease_expired', explanation: 7 } },
+  ];
+  for (const reply of replies) {
+    const dir = mkdtempSync(join(tmpdir(), 'launch-attach-refusal-'));
+    const path = join(dir, 'admission.sock');
+    const server = createServer((socket) => readLines(socket, () => writeLine(socket, reply)));
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(path, resolve); });
+    try {
+      await assert.rejects(
+        attachHq(path, { launch_id: `ln_${'a1'.repeat(12)}`, attach: 'b2'.repeat(32) }, { contracts }),
+        (error) => error?.name !== 'HqRefusal',
+      );
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });

@@ -4,15 +4,259 @@
 // commitment. Then the recovery ladder, with real member processes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { connect as netConnect } from 'node:net';
 import { join } from 'node:path';
 import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
 import { connectHq } from '../lib/hq-client.mjs';
 import { handoffs, readNotes } from '../lib/notes.mjs';
-import { DIGEST, fake, makeSoul, schema, setup, SOUL, startHQ, validate } from './harness.mjs';
+import { accountHQ, DIGEST, fake, hqProxy, makeSoul, schema, setup, SOUL, startHQ, validate } from './harness.mjs';
 
 const recoveries = (t) => t.soul.events().filter((e) => e.event === 'recovery').map((e) => [e.member_id, e.failure, e.action]);
 const finals = (t, taskId) => t.receipts('task.commit').filter((r) => r.task_id === taskId && r.status === 'completed');
+
+test('row 16b: the Soul uses HQ launch, its account member sockets, and HQ stop end to end', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  let t;
+  let finished = false;
+  try {
+    t = await setup({ hq: isolated.options });
+    const taskId = await t.offer();
+    const result = await t.soul.prompt('work through the isolated harness accounts');
+    assert.match(result.text, new RegExp(`Completed ${taskId}`));
+    assert.deepEqual(t.soul.events().filter((e) => e.event === 'member-started').map((e) => [e.member_id, e.launch]).sort(), [['m_lead', 'hq'], ['m_spec', 'hq']]);
+    assert.deepEqual(t.receipts('hq.launch').map((r) => [r.member_id, r.account]).sort(), [['m_lead', 'hqm_a'], ['m_spec', 'hqm_b']]);
+    assert.deepEqual(t.receipts('hq.bind').map((r) => r.caller_account).sort(), ['hqm_a', 'hqm_b']);
+
+    const accountDir = join(isolated.layout.homes.hqm_b, '.agent-bot-hq', 'souls', SOUL, 'm_spec');
+    assert.ok(readdirSync(accountDir).some((name) => /^artifact_[0-9a-f]{12}\.txt$/.test(name)), 'the adapter wrote in HQ\'s returned account directory');
+    assert.equal(existsSync(join(t.contents, 'home', 'm_spec')), false, 'the cooperative home was not created');
+
+    const memberSockets = ['hqm_a', 'hqm_b'].flatMap((account) => readdirSync(join(isolated.layout.dir, account))
+      .filter((name) => name.startsWith('member-')).map((name) => join(isolated.layout.dir, account, name)));
+    assert.equal(memberSockets.length, 2);
+    assert.ok(memberSockets.every((path) => (statSync(path).mode & 0o777) === 0o660));
+    const intruder = await connectHq(memberSockets[0]);
+    await assert.rejects(intruder.request('hello', { token: 'wrong-member-token' }), (error) => error.code === 'souls.unknown_member');
+    await intruder.close();
+
+    await t.done();
+    finished = true;
+    assert.ok(memberSockets.every((path) => !existsSync(path)), 'member sockets are removed with their launches');
+    assert.deepEqual(t.receipts('hq.launch.exited').map((r) => [r.member_id, r.reason, r.contained]).sort(), [['m_lead', 'stopped', true], ['m_spec', 'stopped', true]]);
+  } finally {
+    if (t && !finished) await t.done();
+    isolated.layout.remove();
+  }
+});
+
+test('a protected request fails before an adapter starts when HQ grants only cooperative', async () => {
+  const hq = await startHQ();
+  const root = makeSoul();
+  try {
+    await assert.rejects(startSoul({ root, hqHome: hq.home, requestedProfile: 'managed-protected', renewEveryMs: 0 }), (error) => error instanceof SoulUnavailable && /managed-cooperative.*managed-protected/.test(error.reason));
+    assert.equal(hq.hq.core.receipts.some((receipt) => receipt.kind === 'hq.launch'), false);
+    assert.equal(existsSync(join(root, 'Contents/host/members.sock')), false);
+  } finally {
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a protected grant never falls back to local launch even when the request was cooperative', async () => {
+  const hq = await startHQ();
+  const proxy = await hqProxy(hq, ({ op, reply }) => op === 'Hello' && reply.ok ? { ...reply, result: { ...reply.result, profile: 'managed-protected', warnings: [] } } : reply);
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    assert.equal(soul.status().profile, 'managed-protected');
+    await assert.rejects(soul.prompt('do not cross the protected boundary'), (error) => error.code === 'host.launch_unavailable');
+    assert.equal(soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+    assert.equal(existsSync(join(root, 'Contents/home/m_lead')), false, 'no local member home was created');
+  } finally {
+    await soul?.stop().catch(() => {});
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a protected Soul latches a cooperative re-admission unavailable and stops its members', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let releasePromptReply;
+  let markPromptReplyHeld;
+  const promptReplyHeld = new Promise((resolve) => { markPromptReplyHeld = resolve; });
+  const proxy = await hqProxy(hq, ({ op, reply, count }) => {
+    if (op === 'Hello' && reply.ok) return { ...reply, result: { ...reply.result, profile: count === 1 ? 'managed-protected' : 'managed-cooperative', warnings: [] } };
+    if (op === 'session/prompt' && count === 2) return new Promise((resolve) => {
+      releasePromptReply = () => resolve(reply);
+      markPromptReplyHeld();
+    });
+    return reply;
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, requestedProfile: 'managed-protected', renewEveryMs: 0 });
+    await soul.prompt('start the protected lead');
+    assert.ok(soul.status().members.some((member) => member.running));
+
+    const inFlight = soul.prompt('this reply races the downgrade');
+    await promptReplyHeld;
+    hq.clock.advance(60_001);
+    const renewal = soul.renew();
+    while (soul.status().state !== 'unavailable') await new Promise((resolve) => setImmediate(resolve));
+    releasePromptReply();
+    await assert.rejects(renewal, (error) => error instanceof SoulUnavailable && /managed-cooperative.*managed-protected/.test(error.reason));
+    await Promise.allSettled([inFlight]);
+    const status = soul.status();
+    assert.deepEqual([status.state, status.profile], ['unavailable', 'managed-cooperative']);
+    assert.ok(status.members.every((member) => !member.running && member.runtime_id === undefined));
+    await assert.rejects(soul.prompt('must stay fenced'), (error) => error instanceof SoulUnavailable && error.state === 'unavailable');
+    assert.throws(() => soul.release(), (error) => error instanceof SoulUnavailable && error.state === 'unavailable');
+    assert.equal(soul.events().filter((event) => event.event === 'member-started').length, 1, 'no member restarted after the downgrade');
+  } finally {
+    await soul?.stop().catch(() => {});
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+test('unauthenticated member connections stay bounded and capacity is released on close', async () => {
+  const hq = await startHQ();
+  const root = makeSoul();
+  let soul;
+  const held = [];
+  const open = () => new Promise((resolve, reject) => {
+    const socket = netConnect(join(root, 'Contents/host/members.sock'));
+    socket.once('connect', () => resolve(socket));
+    socket.once('error', reject);
+  });
+  try {
+    soul = await startSoul({ root, hqHome: hq.home, renewEveryMs: 0 });
+    for (let i = 0; i < 16; i += 1) held.push(await open());
+    const overflow = await Promise.all(Array.from({ length: 64 }, async () => {
+      const socket = await open();
+      await new Promise((resolve) => socket.once('close', resolve));
+      return socket;
+    }));
+    assert.ok(overflow.every((socket) => socket.destroyed));
+
+    const released = held.map((socket) => new Promise((resolve) => socket.once('close', resolve)));
+    for (const socket of held) socket.destroy();
+    await Promise.all(released);
+    const accepted = await open();
+    const outcome = await Promise.race([
+      new Promise((resolve) => accepted.once('close', () => resolve('closed'))),
+      new Promise((resolve) => setTimeout(() => resolve('open'), 50)),
+    ]);
+    assert.equal(outcome, 'open', 'a released slot accepts another unauthenticated connection');
+    accepted.destroy();
+  } finally {
+    for (const socket of held) socket.destroy();
+    await soul?.stop().catch(() => {});
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an available HQ launch does not fall back locally when adapter environment cannot cross the boundary', async () => {
+  const isolated = accountHQ();
+  let t;
+  try {
+    t = await setup({
+      hq: isolated.options,
+      soul: { adapters: { 'fake-lead': fake(undefined, { env: { EXTRA_UNREVIEWED: 'x' } }), 'fake-specialist': fake() } },
+    });
+    await assert.rejects(t.soul.prompt('work'), /environment variables that HQ account launch cannot accept/);
+    assert.equal(t.soul.events().some((event) => event.event === 'member-launch-fallback' || event.event === 'member-started'), false);
+    assert.equal(t.receipts('hq.launch').length, 0, 'the reserved launch never attached or started');
+  } finally {
+    await t?.done();
+    isolated.layout.remove();
+  }
+});
+
+test('an attach-time account launch failure falls back locally only in the cooperative profile', async () => {
+  const isolated = accountHQ();
+  const spawn = isolated.options.launch.spawn;
+  let refused = false;
+  isolated.options.launch.spawn = (file, args, options) => {
+    if (!refused && args[1] === '-H') {
+      refused = true;
+      const error = new Error('injected sudo launch failure');
+      error.code = 'ENOENT';
+      throw error;
+    }
+    return spawn(file, args, options);
+  };
+  let t;
+  try {
+    t = await setup({ hq: isolated.options });
+    const result = await t.soul.prompt('use the authorized cooperative fallback');
+    assert.match(result.text, /No waiting directives and no open tasks/);
+    assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-launch-fallback').map((event) => event.member_id), ['m_lead']);
+    assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-started').map((event) => event.launch), ['local']);
+  } finally {
+    await t?.done();
+    isolated.layout.remove();
+  }
+});
+
+test('a request-time account launch refusal fails before starting a broken local fallback', async () => {
+  const isolated = accountHQ();
+  const spawn = isolated.options.launch.spawn;
+  isolated.options.launch.spawn = (file, args, options) => {
+    if (args[1] !== '-H' && args[2] === 'hqm_a') {
+      const error = new Error('injected readiness failure');
+      error.code = 'ENOENT';
+      throw error;
+    }
+    return spawn(file, args, options);
+  };
+  let t;
+  try {
+    t = await setup({ hq: isolated.options });
+    await assert.rejects(
+      t.soul.prompt('do not start an account-bound member on the shared broker'),
+      (error) => error instanceof SoulUnavailable && /account-bound member m_lead/.test(error.reason),
+    );
+    assert.equal(t.soul.status().state, 'unavailable');
+    assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-launch-fallback-refused').map((event) => event.member_id), ['m_lead']);
+    assert.equal(t.soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+    assert.ok(t.receipts('hq.bind.refused').some((receipt) => receipt.runtime_id === t.soul.status().members.find((member) => member.member_id === 'm_lead').runtime_id));
+  } finally {
+    await t?.done();
+    isolated.layout.remove();
+  }
+});
+
+test('a malformed launch result is stopped before a clean retry', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  const proxy = await hqProxy(hq, ({ op, reply, count }) => op === 'launch' && reply.ok && count === 1
+    ? { ...reply, result: { ...reply.result, cwd: 'not-absolute' } }
+    : reply);
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await assert.rejects(soul.prompt('first launch is malformed'), /absolute working directory/);
+    const result = await soul.prompt('second launch is clean');
+    assert.match(result.text, /No waiting directives and no open tasks/);
+    assert.deepEqual(soul.events().filter((event) => event.event === 'member-started').map((event) => event.launch), ['hq']);
+  } finally {
+    await soul?.stop().catch(() => {});
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
 
 test('Stage 1 exit: one task completes with scoped proposals and one final commitment', async () => {
   const t = await setup();
@@ -56,7 +300,7 @@ test('Stage 1 exit: one task completes with scoped proposals and one final commi
     // Each member committed as its own bound runtime, over the broker.
     const runtimes = Object.fromEntries(status.members.map((m) => [m.member_id, m.runtime_id]));
     assert.ok(commits.every((r) => r.caller === `runtime:${runtimes[r.by]}`));
-    assert.deepEqual(t.receipts('hq.bind').map((r) => r.member_id).sort(), ['m_lead', 'm_spec']);
+    assert.deepEqual([...new Set(t.receipts('hq.bind').map((r) => r.member_id))].sort(), ['m_lead', 'm_spec']);
 
     // Role routing happened once, lead to specialist.
     assert.deepEqual(t.soul.events().filter((e) => e.event === 'routed').map((e) => [e.from, e.to, e.role, e.task_id]), [['m_lead', 'm_spec', 'specialist', taskId]]);
