@@ -13,9 +13,11 @@ and sections 3, 5, 7 and 9 of the
    for each admitted runtime, `Ready` when a member is up, and `Lease`
    renewals. HQ decides admission, the profile in force, the installation
    epoch and the lease generation.
-2. **Starts the members.** Each member's adapter runs as its own process, in
-   `Contents/home/<member>/`. The entry point drives it over the Agent
-   Client Protocol (ACP) on stdio, one turn at a time per member.
+2. **Starts the members.** The entry point first asks HQ to launch each
+   adapter in its harness account and drives the attached stream over the
+   Agent Client Protocol (ACP), one turn at a time per member. In the
+   cooperative profile only, an explicit `host.launch_unavailable` refusal
+   falls back to a local process in `Contents/home/<member>/`.
 3. **Gives the owner one conversation.** A prompt at the front door is one
    turn of the lead. The lead's reply is streamed back.
 4. **Routes by role.** The lead asks the entry point to hand a prompt to
@@ -39,11 +41,28 @@ sending the binding.
 
 In the cooperative profile the binding is still a bearer secret inside the
 Soul, so a member that reads another member's binding can speak for it. HQ
-reports `managed-cooperative` for that reason. Where the owner gives a member
-its own OS account, HQ gives that account its own broker endpoint and accepts
-the member's runtime from that endpoint alone. Whoever starts the member in
-that account names the endpoint in `AGENT_BOT_SOULS_BROKER`. The entry point
-does not start members in other accounts yet (plan row 16b).
+reports `managed-cooperative` for that reason. Where the owner configures a
+harness account, HQ launches the adapter there, gives it that account's own
+broker endpoint, and accepts the runtime from that endpoint alone (plan row
+16b). HQ's returned account-private directory is the ACP session directory.
+The entry point supplies only the member token; HQ derives the member ID,
+role and both socket paths from the admitted runtime and verified account.
+Adapter-defined environment variables are refused instead of silently dropped.
+
+For the current pilot, HQ and the Soul entry point share the host UID, so the
+entry point can bind the returned path inside HQ's harness endpoint directory.
+The later dedicated-HQ-account move must replace that transitional ownership
+with an HQ-owned proxy or a separately provisioned entry-point directory. This
+integration does not claim that service-account boundary is complete.
+
+`--profile managed-protected` requests protected operation and fails before
+an adapter starts if HQ grants a weaker profile or account launch cannot be
+used. The default `managed-cooperative` request preserves existing hosts: it
+uses local spawn only when HQ explicitly reports `host.launch_unavailable`.
+Before request-time fallback it proves the admitted runtime may use HQ's
+shared broker; an account-bound runtime with no returned endpoint fails
+closed. If attach fails after a reservation returned its verified endpoint,
+fallback uses that account endpoint.
 
 It never approves a permission request from an adapter. It answers
 `cancelled`, because approvals are HQ's records of the owner's decisions.
@@ -64,8 +83,12 @@ Exactly one member has the role `lead`. soul-package does not yet specify
 the fields of `SoulInfo.json` or `SoulLock.json`; the entry point reads only
 these and ignores the rest.
 
-It writes `host/members.sock` (0600, in a 0700 directory),
-`comms/notes/<note_id>.json` and each member's `home/<member>/`.
+It writes `host/members.sock` (0600, in a 0700 directory) for cooperative
+local fallback. An HQ launch gets a per-launch 0660 member socket in the
+harness account's verified endpoint directory; the entry point bounds
+unauthenticated connections, requires the member token within five seconds,
+and removes the socket on stop. It also writes `comms/notes/<note_id>.json`
+and, for local fallback, each member's `home/<member>/`.
 
 ## What a member can ask
 
@@ -152,7 +175,7 @@ notice-consumer or MCP integration evidence.
 
 ## Contract validation
 
-The runtime consumes `soul-contracts` v0.4.1 through the commit and
+The runtime consumes `soul-contracts` v0.5.0 through the commit and
 `sha256-manifest-v1` digest in `governance/soul-contracts.json`. The explicit
 preparation step is documented in the [README](../README.md). Schemas and
 fixtures stay in that external dependency; none is copied into this
@@ -171,7 +194,7 @@ after reading. A corrupt or unreadable stored note makes its handoff
 restrictions unavailable; it is never silently discarded to allow fail-over.
 
 `tests/contracts.test.mjs` runs every shared positive and negative fixture
-through the runtime codec for its schema/parse verdict (33 positives and 55
+through the runtime codec for its schema/parse verdict (38 positives and 88
 negatives across 19 schemas), checks their byte pins and canonicalization
 vectors, and exercises the two T14 version/capability refusals. This is
 component evidence for the platform's

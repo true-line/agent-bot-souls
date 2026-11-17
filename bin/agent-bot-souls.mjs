@@ -2,8 +2,8 @@
 // agent-bot-souls: the Soul runtime's executable (platform PDR-0037),
 // reached through the shim as `agent-bot souls …`.
 //
-//   agent-bot-souls run  --soul DIR [--hq-home DIR]   the ACP front door, on stdio
-//   agent-bot-souls chat --soul DIR [--hq-home DIR]   a terminal chat with the Soul
+//   agent-bot-souls run  --soul DIR [--hq-home DIR] [--profile PROFILE]   the ACP front door, on stdio
+//   agent-bot-souls chat --soul DIR [--hq-home DIR] [--profile PROFILE]   a terminal chat with the Soul
 //   agent-bot-souls member <op> [JSON]                a member's requests, from inside a member
 //   agent-bot-souls fake-adapter                      the fake ACP adapter (testing and demos)
 //
@@ -18,8 +18,8 @@ import { chat, serveAcp } from '../lib/front-door.mjs';
 import { connectMember } from '../lib/member.mjs';
 
 const USAGE = `usage:
-  agent-bot-souls run  --soul DIR [--hq-home DIR]
-  agent-bot-souls chat --soul DIR [--hq-home DIR]
+  agent-bot-souls run  --soul DIR [--hq-home DIR] [--profile managed-cooperative|managed-protected]
+  agent-bot-souls chat --soul DIR [--hq-home DIR] [--profile managed-cooperative|managed-protected]
   agent-bot-souls member <runtime|directives|handoffs|get|commit|route|note> [JSON]
   agent-bot-souls fake-adapter
   agent-bot-souls --version`;
@@ -37,10 +37,10 @@ const MEMBER_OPS = {
 function options(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--soul' || argv[i] === '--hq-home') { out[argv[i].slice(2)] = argv[i + 1]; i += 1; } else throw new Error(`unknown argument ${argv[i]}`);
+    if (argv[i] === '--soul' || argv[i] === '--hq-home' || argv[i] === '--profile') { out[argv[i].slice(2)] = argv[i + 1]; i += 1; } else throw new Error(`unknown argument ${argv[i]}`);
   }
   if (!out.soul) throw new Error('--soul DIR is required');
-  return { root: out.soul, hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq') };
+  return { root: out.soul, hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq'), requestedProfile: out.profile ?? 'managed-cooperative' };
 }
 
 async function main([cmd, ...rest]) {

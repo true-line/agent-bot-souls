@@ -1,11 +1,15 @@
 // Shared setup: the real HQ from agent-bot-hq with agent-comms's broker
 // plugin serving broker.sock, a Soul package in a temporary directory whose
 // members run the fake adapter, and the entry point started on it.
+import { spawn as nodeSpawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { connect as netConnect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pipeline } from 'node:stream';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startSoul } from '../lib/entry-point.mjs';
+import { readLines, writeLine } from '../lib/ndjson.mjs';
 import { checkout } from './pinned.mjs';
 
 const hqDir = checkout('agent-bot-hq');
@@ -25,6 +29,100 @@ export const FAKE = [process.execPath, BIN, 'fake-adapter'];
 const scenarioEnv = (scenario) => (scenario ? { FAKE_ADAPTER_SCENARIO: JSON.stringify(scenario) } : {});
 
 export const startHQ = (options = {}) => hqHarness.startHQ({ plugins: [brokerPlugin()], ...options });
+
+// A transparent test proxy for admission replies. It keeps the real pinned
+// HQ on both sides of the boundary while allowing a regression to corrupt or
+// downgrade one selected reply. Broker traffic is forwarded unchanged.
+export async function hqProxy(hq, transformReply = ({ reply }) => reply) {
+  const home = mkdtempSync(join(tmpdir(), 'souls-hq-proxy-'));
+  const servers = [];
+  const sockets = new Set();
+  const counts = new Map();
+  const listen = async (name, connection) => {
+    const server = createServer(connection);
+    servers.push(server);
+    await new Promise((resolve, reject) => { server.once('error', reject); server.listen(join(home, name), resolve); });
+  };
+  await listen('admission.sock', (client) => {
+    const upstream = netConnect(join(hq.home, 'admission.sock'));
+    sockets.add(client); sockets.add(upstream);
+    const pending = new Map();
+    const close = () => { client.destroy(); upstream.destroy(); };
+    for (const socket of [client, upstream]) {
+      socket.on('error', close);
+      socket.on('close', () => sockets.delete(socket));
+    }
+    readLines(client, (line) => {
+      const request = JSON.parse(line);
+      pending.set(request.id, request);
+      writeLine(upstream, request);
+    }, close);
+    readLines(upstream, (line) => {
+      const reply = JSON.parse(line);
+      const request = pending.get(reply.id);
+      pending.delete(reply.id);
+      const op = request?.op ?? request?.method;
+      const count = (counts.get(op) ?? 0) + 1;
+      counts.set(op, count);
+      Promise.resolve(transformReply({ op, request, reply, count })).then(
+        (output) => writeLine(client, output),
+        close,
+      );
+    }, close);
+  });
+  await listen('broker.sock', (client) => {
+    const upstream = netConnect(join(hq.home, 'broker.sock'));
+    sockets.add(client); sockets.add(upstream);
+    const close = () => { client.destroy(); upstream.destroy(); };
+    for (const socket of [client, upstream]) {
+      socket.on('error', close);
+      socket.on('close', () => sockets.delete(socket));
+    }
+    pipeline(client, upstream, (error) => { if (error) close(); });
+    pipeline(upstream, client, (error) => { if (error) close(); });
+  });
+  return {
+    home,
+    async done() {
+      for (const socket of sockets) socket.destroy();
+      await Promise.all(servers.map((server) => new Promise((resolve) => server.close(resolve))));
+      rmSync(home, { recursive: true, force: true });
+    },
+  };
+}
+
+// Execute HQ's exact injected sudo argv as this test user. The real-account
+// kernel boundary remains HQ's CI lane; this gives Souls a real pinned HQ,
+// real launch/attach streams, the fixed wrapper, and real adapter processes.
+export function accountLaunch(layout) {
+  const calls = [];
+  const spawn = (file, args, options) => {
+    if (file !== '/usr/bin/sudo') throw new Error(`unexpected launcher ${file}`);
+    const split = args.indexOf('--');
+    if (split === -1 || !args[split + 1]) throw new Error(`unexpected sudo argv ${JSON.stringify(args)}`);
+    const account = args[1] === '-H' ? args[3] : args[2];
+    const launch = args[1] === '-H';
+    const child = nodeSpawn(args[split + 1], args.slice(split + 2), {
+      ...options,
+      ...(launch ? { env: { ...options.env, HOME: layout.homes[account] } } : {}),
+    });
+    calls.push({ file, args, options, child });
+    return child;
+  };
+  return { spawn, calls };
+}
+
+export function accountHQ(layout = harnessLayout()) {
+  const launch = accountLaunch(layout);
+  return {
+    layout,
+    launch,
+    options: {
+      platform: 'linux', accounts: layout.resolve, harnessLstat: layout.lstat, launch: { spawn: launch.spawn },
+      config: { acceptedDefinitions: { [SOUL]: [DIGEST] }, harnesses: { dir: layout.dir, accounts: { 'fake-lead': 'hqm_a', 'fake-specialist': 'hqm_b' } } },
+    },
+  };
+}
 
 // A Soul package: a lead and a specialist on fake adapters. `lead` and
 // `spec` are fake-adapter scenarios. `info`, `lock` and `adapters` replace
@@ -50,13 +148,13 @@ export function makeSoul({ lead, spec, info, lock, adapters } = {}) {
 }
 export const fake = (scenario, extra = {}) => ({ command: FAKE, env: scenarioEnv(scenario), ...extra });
 
-export async function setup({ soul: soulOptions, hq: hqOptions } = {}) {
+export async function setup({ soul: soulOptions, hq: hqOptions, runtime: runtimeOptions } = {}) {
   const t = await startHQ(hqOptions);
   const root = makeSoul(soulOptions);
   const delays = [];
   let soul;
   try {
-    soul = await startSoul({ root, hqHome: t.home, delay: async (ms) => { delays.push(ms); }, renewEveryMs: 0 });
+    soul = await startSoul({ root, hqHome: t.home, delay: async (ms) => { delays.push(ms); }, renewEveryMs: 0, ...runtimeOptions });
   } catch (e) {
     await t.done();
     rmSync(root, { recursive: true, force: true });
