@@ -6,6 +6,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { connect as netConnect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pipeline } from 'node:stream';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { startSoul } from '../lib/entry-point.mjs';
 import { readLines, writeLine } from '../lib/ndjson.mjs';
@@ -77,7 +78,8 @@ export async function hqProxy(hq, transformReply = ({ reply }) => reply) {
       socket.on('error', close);
       socket.on('close', () => sockets.delete(socket));
     }
-    client.pipe(upstream).pipe(client);
+    pipeline(client, upstream, (error) => { if (error) close(); });
+    pipeline(upstream, client, (error) => { if (error) close(); });
   });
   return {
     home,
