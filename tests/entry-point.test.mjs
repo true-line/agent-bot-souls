@@ -4,8 +4,9 @@
 // commitment. Then the recovery ladder, with real member processes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { connect as netConnect } from 'node:net';
+import { connect as netConnect, Server } from 'node:net';
 import { join } from 'node:path';
 import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
 import { connectHq } from '../lib/hq-client.mjs';
@@ -338,6 +339,25 @@ test('the member socket is private, and only a running member\'s token opens it'
   } finally { await t.done(); }
 });
 
+test('a failed bind leaves the path reported in use untouched', async (ctx) => {
+  const t = await setup();
+  try {
+    await t.soul.stop();
+    const path = join(t.contents, 'host/members.sock');
+    const original = Server.prototype.listen;
+    const listener = ctx.mock.method(Server.prototype, 'listen', function (...args) {
+      if (args[0] !== path) return original.apply(this, args);
+      writeFileSync(path, 'occupied', { flag: 'wx' });
+      queueMicrotask(() => this.emit('error', Object.assign(new Error('address already in use'), { code: 'EADDRINUSE' })));
+      return this;
+    });
+    try {
+      await assert.rejects(startSoul({ root: t.root, hqHome: t.home, renewEveryMs: 0 }), { code: 'EADDRINUSE' });
+      assert.equal(readFileSync(path, 'utf8'), 'occupied');
+    } finally { listener.mock.restore(); }
+  } finally { await t.done(); }
+});
+
 test('a Soul runs under one entry point: a second is refused, and a stale socket file is replaced', async () => {
   const t = await setup();
   try {
@@ -349,7 +369,14 @@ test('a Soul runs under one entry point: a second is refused, and a stale socket
     assert.equal((await t.task(taskId)).task.status, 'completed');
 
     await t.soul.stop();
-    writeFileSync(join(t.contents, 'host/members.sock'), '');
+    const path = join(t.contents, 'host/members.sock');
+    writeFileSync(path, 'existing file');
+    await assert.rejects(startSoul({ root: t.root, hqHome: t.home, renewEveryMs: 0 }), /member socket path is occupied/);
+    assert.equal(readFileSync(path, 'utf8'), 'existing file');
+    rmSync(path);
+    // Exit without closing the listener, as when a previous entry point stopped abruptly.
+    execFileSync(process.execPath, ['-e', "require('node:net').createServer().listen(process.argv[1], () => process.exit(0))", path]);
+    assert.ok(statSync(path).isSocket());
     const again = await startSoul({ root: t.root, hqHome: t.home, renewEveryMs: 0 });
     try {
       assert.equal(again.status().state, 'ready');
