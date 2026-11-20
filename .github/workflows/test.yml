@@ -22,3 +22,20 @@ jobs:
           node --version
           npm run prepare:contracts
           npm test
+  darwin-member-sandbox:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Check out the exact Souls revision
+        run: |
+          git init -q .
+          git fetch -q --no-tags --depth 1 "https://github.com/${GITHUB_REPOSITORY}.git" "$GITHUB_SHA"
+          git checkout -q --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+      - name: Exercise cooperative member launches through the macOS process sandbox
+        run: |
+          export TMPDIR="$(mktemp -d /private/tmp/souls.XXXXXXXX)"
+          trap 'rm -rf "$TMPDIR"' EXIT
+          chgrp "$(id -g)" "$TMPDIR"
+          npm run prepare:contracts
+          node --test tests/darwin-member-sandbox.test.mjs

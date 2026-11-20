@@ -1,6 +1,7 @@
 // Checkouts of the repositories the tests run against, at the commits in
 // governance/pins.json: agent-bot-hq (the real HQ, and through its own pin
-// the soul-contracts schemas) and agent-bot-comms (the broker plugin). They
+// the soul-contracts schemas), agent-bot-comms (the broker plugin), and
+// agent-bot-machine (the macOS process sandbox profile). They
 // are cached under node_modules/.cache. With no cache and no network the
 // tests fail; they never skip.
 import assert from 'node:assert/strict';
@@ -16,7 +17,8 @@ export function checkout(name) {
   assert.ok(pin, `governance/pins.json has no pin for ${name}`);
   const parent = fileURLToPath(new URL('../node_modules/.cache/', import.meta.url));
   const cache = join(parent, `${name}-${pin.commit}`);
-  if (existsSync(join(cache, 'package.json'))) return cache;
+  const marker = pin.profile ?? 'package.json';
+  if (existsSync(join(cache, marker))) return cache;
   mkdirSync(parent, { recursive: true });
   const work = mkdtempSync(join(parent, `${name}-fetch-`));
   try {
@@ -30,7 +32,7 @@ export function checkout(name) {
       renameSync(work, cache);
     } catch (error) {
       // Another test file fetched it first; keep that tree.
-      if (!existsSync(join(cache, 'package.json'))) throw error;
+      if (!existsSync(join(cache, marker))) throw error;
       rmSync(work, { recursive: true, force: true });
     }
   } catch (error) {
