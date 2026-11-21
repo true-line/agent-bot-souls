@@ -2,23 +2,25 @@
 // agent-bot-souls: the Soul runtime's executable (platform PDR-0037),
 // reached through the shim as `agent-bot souls …`.
 //
-//   agent-bot-souls run  --soul DIR [--hq-home DIR] [--profile PROFILE]   the ACP front door, on stdio
+//   agent-bot-souls run  --soul DIR [--hq-home DIR] [--hq-admission-socket PATH] [--profile PROFILE]
 //   agent-bot-souls chat --soul DIR [--hq-home DIR] [--profile PROFILE]   a terminal chat with the Soul
 //   agent-bot-souls member <op> [JSON]                a member's requests, from inside a member
 //   agent-bot-souls fake-adapter                      the fake ACP adapter (testing and demos)
 //
 // DIR for --soul is the package directory (the one that holds Contents/).
 // --hq-home is HQ's state directory: $AGENT_BOT_HQ_HOME, else ~/.agent-bot-hq.
+// --hq-admission-socket is the exact Machine-pinned runner endpoint when HQ
+// starts this process under a separate installation account.
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { startSoul } from '../lib/entry-point.mjs';
 import { runFakeAdapter } from '../lib/fake-adapter.mjs';
 import { chat, serveAcp } from '../lib/front-door.mjs';
 import { connectMember } from '../lib/member.mjs';
 
 const USAGE = `usage:
-  agent-bot-souls run  --soul DIR [--hq-home DIR] [--profile managed-cooperative|managed-protected]
+  agent-bot-souls run  --soul DIR [--hq-home DIR] [--hq-admission-socket PATH] [--profile managed-cooperative|managed-protected]
   agent-bot-souls chat --soul DIR [--hq-home DIR] [--profile managed-cooperative|managed-protected]
   agent-bot-souls member <runtime|directives|handoffs|get|commit|route|note> [JSON]
   agent-bot-souls fake-adapter
@@ -36,7 +38,7 @@ const MEMBER_OPS = {
 
 function options(argv) {
   const out = {};
-  const optionsWithValues = ['--soul', '--hq-home', '--profile'];
+  const optionsWithValues = ['--soul', '--hq-home', '--hq-admission-socket', '--profile'];
   for (let i = 0; i < argv.length; i += 2) {
     const option = argv[i];
     if (!optionsWithValues.includes(option)) throw new Error(`unknown argument ${option}`);
@@ -45,7 +47,9 @@ function options(argv) {
     out[option.slice(2)] = value;
   }
   if (!out.soul) throw new Error('--soul DIR is required');
-  return { root: out.soul, hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq'), requestedProfile: out.profile ?? 'managed-cooperative' };
+  if (out['hq-admission-socket'] && !isAbsolute(out['hq-admission-socket'])) throw new Error('--hq-admission-socket requires an absolute path');
+  return { root: out.soul, hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq'),
+    hqAdmissionSocket: out['hq-admission-socket'], requestedProfile: out.profile ?? 'managed-cooperative' };
 }
 
 async function main([cmd, ...rest]) {

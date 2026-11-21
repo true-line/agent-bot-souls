@@ -61,11 +61,22 @@ Machine must authenticate and provision the one-use account/path assignment.
 For this route the entry point checks each accepted member connection's
 kernel peer UID against the assigned runner and bridge UIDs before it
 reads the member token. The runner token can use ordinary member operations
-but cannot request runtime bootstrap or the channel binding; those require
-the bridge UID and a separate bridge token. Handoff of that token to the
-bridge over the reviewed fixed launch pipe, a race-resistant directory
-handoff, and physical cross-UID verification remain production gates. This
-parser alone does not enable the route.
+but cannot request the member socket `runtime` response; that requires the
+bridge UID and an HQ-minted bridge member token. In the separate-runner route
+the response omits the broker path and `channel_binding`. Current HQ Equip
+still places its older `channel_binding` in runner memory; HQ must make that
+binding non-authoritative at B's broker endpoint and mint a separate B-only
+broker proof. Denying a later socket operation does not provide that custody.
+
+The runner uses `--hq-admission-socket` for its Machine-pinned HQ endpoint.
+After member socket bind it sends `launch.bridge_ready` with the exact launch
+ID, attach token and HQ nonce. It accepts only `{launch_id, bridge_ready:
+true}` before requesting `launch.attach`. HQ must answer only after it has
+verified a live B-only HMAC broker bind and Machine-attested start/endpoint
+identities, and must recheck those when attach starts ACP. Current HQ does not
+implement that operation, so this route fails closed. B-only token/proof
+handoff over the fixed inherited pipe, a race-resistant directory handoff,
+and physical cross-UID verification remain production gates.
 
 `--profile managed-protected` requests protected operation and fails before
 an adapter starts if HQ grants a weaker profile or account launch cannot be
