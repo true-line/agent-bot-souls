@@ -5,6 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { once } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, Server } from 'node:net';
 import { join } from 'node:path';
@@ -472,6 +473,170 @@ test('a malformed launch result is stopped before a clean retry', { timeout: 30_
     assert.match(result.text, /No waiting directives and no open tasks/);
     assert.deepEqual(soul.events().filter((event) => event.event === 'member-started').map((event) => event.launch), ['hq']);
   } finally {
+    await soul?.stop().catch(() => {});
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+test('an unconfirmed reservation cleanup preserves the setup error and fences another launch', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  const proxy = await hqProxy(hq, ({ op, reply }) => {
+    if (op === 'launch' && reply.ok) return { ...reply, result: { ...reply.result, cwd: 'not-absolute' } };
+    if (op === 'launch.stop' && reply.ok) return { ...reply, result: { ...reply.result, state: 'uncontained' } };
+    return reply;
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await assert.rejects(soul.prompt('exercise malformed setup'), (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.match(error.errors[0].message, /absolute working directory/);
+      assert.match(error.errors[1].message, /m_lead.*uncontained/);
+      return true;
+    });
+    await assert.rejects(soul.prompt('try starting again'), /connection closed/);
+    assert.equal(isolated.launch.calls.some((call) => call.args[1] === '-H'), false);
+  } finally {
+    await soul?.stop();
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+test('shutdown fences member startup and cleans up its reservation, attach, or ACP handshake', async (suite) => {
+  for (const scenario of ['launch', 'unanswered launch', 'launch.attach', 'initialize']) {
+    await suite.test(scenario, { timeout: 15_000 }, async (t) => {
+      const reservationLost = scenario === 'unanswered launch';
+      const stage = reservationLost ? 'launch' : scenario;
+      const isolated = accountHQ();
+      const hq = await startHQ(isolated.options);
+      let release;
+      let launch;
+      let reached;
+      const held = new Promise((resolve) => { reached = resolve; });
+      const stops = [];
+      const proxy = await hqProxy(hq, ({ op, reply }) => {
+        if (op === 'launch' && reply.ok) launch = reply.result;
+        if (op === 'launch.stop' && reply.ok) stops.push(reply.result);
+        if (op !== stage) return reply;
+        return new Promise((resolve) => {
+          release = () => resolve(reply);
+          reached();
+        });
+      });
+      const root = makeSoul();
+      let soul;
+      try {
+        soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+        const prompt = assert.rejects(soul.prompt('stop while starting a member'), /the entry point stopped/);
+        await held;
+
+        if (reservationLost) t.mock.timers.enable({ apis: ['setTimeout'] });
+        const stopping = soul.stop();
+        assert.equal(soul.stop(), stopping);
+        if (reservationLost) {
+          const refused = assert.rejects(stopping, /m_lead is unconfirmed after the shutdown deadline/);
+          await new Promise(setImmediate);
+          t.mock.timers.tick(30_000);
+          t.mock.timers.reset();
+          await refused;
+          await prompt;
+          assert.deepEqual(stops, []);
+          assert.equal(isolated.launch.calls.some((call) => call.args[1] === '-H'), false);
+          assert.equal(existsSync(launch.member_socket), false);
+          assert.equal(existsSync(join(root, 'Contents', 'host', 'members.sock')), false);
+          return;
+        }
+        if (stage === 'launch') {
+          // The reservation already exists at HQ, but its ID is still in
+          // the withheld reply. Shutdown must wait before confirming it.
+          const reachedNextTick = new Promise((resolve) => setImmediate(resolve, 'waiting'));
+          assert.equal(await Promise.race([stopping, reachedNextTick]), 'waiting');
+          release();
+        }
+        // For attach and initialize the reply remains withheld until after
+        // shutdown. Each transport must still be closed and the launch ended.
+        let timeout;
+        try {
+          const deadline = new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error(`shutdown waited for the ${stage} reply`)), 4000);
+          });
+          await Promise.race([stopping, deadline]);
+        } finally { clearTimeout(timeout); }
+        await prompt;
+        assert.deepEqual(stops, [{ launch_id: launch.launch_id, state: 'exited' }]);
+        assert.equal(existsSync(launch.member_socket), false);
+        const children = isolated.launch.calls.filter((call) => call.args[1] === '-H').map(({ child }) => child);
+        if (stage === 'launch') assert.equal(children.length, 0);
+        else {
+          assert.equal(children.length, 1);
+          await Promise.all(children.map((child) => child.exitCode !== null || child.signalCode !== null ? undefined : once(child, 'exit')));
+        }
+        assert.equal(soul.events().some((event) => event.event === 'member-started'), false);
+      } finally {
+        if (reservationLost) t.mock.timers.reset();
+        release?.();
+        await soul?.stop().catch(() => {});
+        await proxy.done();
+        await hq.done();
+        rmSync(root, { recursive: true, force: true });
+        isolated.layout.remove();
+      }
+    });
+  }
+});
+
+test('shutdown reports an unanswered stop and closes the other accepted launch', { timeout: 15_000 }, async (t) => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let release;
+  let held;
+  const waiting = new Promise((resolve) => { held = resolve; });
+  const stops = [];
+  const proxy = await hqProxy(hq, ({ op, reply }) => {
+    if (op !== 'launch.stop') return reply;
+    assert.equal(reply.result?.state, 'exited');
+    stops.push(reply.result.launch_id);
+    if (stops.length !== 1) return reply;
+    return new Promise((resolve) => {
+      release = () => resolve(reply);
+      held();
+    });
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    const owner = await hq.owner();
+    const offer = await owner.request('tasks.offer', {
+      operation_id: 'offer_stop_timeout', objective: 'Exercise shutdown', done_criteria: 'Both members started', accountable_soul: SOUL,
+    });
+    assert.equal(offer.ok, true);
+    assert.match((await soul.prompt('Work the waiting task.')).text, new RegExp(`Completed ${offer.result.task_id}`));
+    const launches = isolated.launch.calls.filter((call) => call.args[1] === '-H');
+    assert.equal(launches.length, 2);
+    assert.ok(launches.every(({ child }) => child.exitCode === null && child.signalCode === null));
+    const childExits = Promise.all(launches.map(({ child }) => once(child, 'exit')));
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const stopping = assert.rejects(soul.stop(), /m_lead is unconfirmed: stop reply timed out/);
+    await waiting;
+    t.mock.timers.tick(45_000);
+    t.mock.timers.reset();
+    await stopping;
+    await childExits;
+    assert.equal(stops.length, 2);
+    assert.ok(launches.every(({ options }) => !existsSync(options.env.AGENT_BOT_SOULS_SOCKET)));
+    assert.equal(existsSync(join(root, 'Contents', 'host', 'members.sock')), false);
+  } finally {
+    t.mock.timers.reset();
+    release?.();
     await soul?.stop().catch(() => {});
     await proxy.done();
     await hq.done();

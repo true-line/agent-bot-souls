@@ -65,19 +65,35 @@ async function main([cmd, ...rest]) {
   }
   if (cmd === 'run' || cmd === 'chat') {
     const soul = await startSoul({ ...options(rest), log: (e) => { if (cmd === 'run' || e.event !== 'member-stderr') process.stderr.write(`${JSON.stringify(e)}\n`); } });
-    const stop = () => soul.stop().then(() => process.exit(0));
+    let stop;
+    const signal = new Promise((resolve) => { stop = () => resolve(); });
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
+    let failure;
     try {
-      if (cmd === 'run') await serveAcp({ soul, input: process.stdin, output: process.stdout });
-      else await chat({ soul, input: process.stdin, output: process.stdout });
-    } finally { await soul.stop(); }
+      const frontDoor = cmd === 'run' ? serveAcp : chat;
+      const serving = frontDoor({ soul, input: process.stdin, output: process.stdout }).catch((error) => { failure = error; });
+      await Promise.race([serving, signal]);
+      try { await soul.stop(); }
+      catch (error) {
+        if (failure) throw new AggregateError([failure, error], `${failure.message}\n${error.message}`);
+        throw error;
+      }
+      if (failure) throw failure;
+    } finally {
+      process.off('SIGINT', stop);
+      process.off('SIGTERM', stop);
+    }
     return 0;
   }
   throw new Error(USAGE);
 }
 
+function exitFailure(error) {
+  process.stderr.write(`agent-bot-souls: ${error.message}\n`, () => process.exit(1));
+}
+
 main(process.argv.slice(2)).then(
   (code) => { if (code !== undefined) process.exit(code); },
-  (e) => { process.stderr.write(`agent-bot-souls: ${e.message}\n`); process.exit(1); },
+  exitFailure,
 );
