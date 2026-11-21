@@ -3,9 +3,10 @@
 // is a terminal chat. Both give one conversation, which is the lead's.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { readFileSync, rmSync } from 'node:fs';
+import { promisify } from 'node:util';
 import { rpcPeer } from '../lib/jsonrpc.mjs';
 import { BIN, makeSoul, SOUL, startHQ } from './harness.mjs';
 
@@ -89,6 +90,28 @@ test('agent-bot-souls chat is the same conversation in a terminal', async () => 
     assert.deepEqual([status.state, status.soul_id, status.profile], ['ready', SOUL, 'managed-cooperative']);
     assert.equal((await t.task(taskId)).status, 'completed');
   } finally { child.kill('SIGKILL'); await t.done(); }
+});
+
+test('run and chat reject an option missing its value before HQ admission', async () => {
+  const t = await world();
+  const execute = promisify(execFile);
+  try {
+    for (const cmd of ['run', 'chat']) {
+      for (const [option, tail] of [
+        ['--profile', ['--profile']],
+        ['--hq-home', ['--hq-home']],
+        ['--soul', ['--soul', '--profile', 'managed-protected']],
+      ]) {
+        await assert.rejects(execute(process.execPath, [BIN, cmd, '--soul', t.root, '--hq-home', t.home, ...tail],
+          { timeout: 5000, env: { ...process.env, AGENT_BOT_HQ_HOME: t.home } }), (error) => {
+          assert.equal(error.code, 1);
+          assert.equal(error.stderr.trim(), `agent-bot-souls: ${option} requires a value`);
+          return true;
+        });
+      }
+    }
+    assert.equal(t.hq.core.receipts.some(receipt => receipt.kind === 'hq.admission'), false);
+  } finally { await t.done(); }
 });
 
 test('the executable reports its version and refuses what it does not know', () => {
