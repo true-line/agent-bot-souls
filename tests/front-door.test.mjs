@@ -92,6 +92,20 @@ test('agent-bot-souls chat is the same conversation in a terminal', async () => 
   } finally { child.kill('SIGKILL'); await t.done(); }
 });
 
+test('the executable reports a strict protected-profile refusal', async () => {
+  const t = await world();
+  try {
+    await assert.rejects(promisify(execFile)(process.execPath, [BIN, 'run', '--soul', t.root, '--hq-home', t.home, '--profile', 'managed-protected'], { timeout: 5000 }), (error) => {
+      assert.equal(error.code, 1);
+      const lines = error.stderr.trim().split('\n');
+      const event = JSON.parse(lines[0]);
+      assert.deepEqual(event, { event: 'profile-refused', code: 'profile_insufficient', source: 'local', requested_profile: 'managed-protected', granted_profile: 'managed-cooperative' });
+      assert.match(lines[1], /agent-bot-souls: the Soul is unavailable: profile_insufficient: HQ granted managed-cooperative when managed-protected was requested/);
+      return true;
+    });
+  } finally { await t.done(); }
+});
+
 test('run and chat reject an option missing its value before HQ admission', async () => {
   const t = await world();
   const execute = promisify(execFile);

@@ -91,11 +91,32 @@ test('row 16b: the Soul uses HQ launch, its account member sockets, and HQ stop 
 test('a protected request fails before an adapter starts when HQ grants only cooperative', async () => {
   const hq = await startHQ();
   const root = makeSoul();
+  const events = [];
   try {
-    await assert.rejects(startSoul({ root, hqHome: hq.home, requestedProfile: 'managed-protected', renewEveryMs: 0 }), (error) => error instanceof SoulUnavailable && /managed-cooperative.*managed-protected/.test(error.reason));
+    await assert.rejects(startSoul({ root, hqHome: hq.home, requestedProfile: 'managed-protected', renewEveryMs: 0, log: (event) => events.push(event) }), (error) => error instanceof SoulUnavailable && error.code === 'profile_insufficient' && /managed-cooperative.*managed-protected/.test(error.reason) && /profile_insufficient/.test(error.message));
+    assert.deepEqual(events.find((event) => event.event === 'profile-refused'), { event: 'profile-refused', code: 'profile_insufficient', source: 'local', requested_profile: 'managed-protected', granted_profile: 'managed-cooperative' });
     assert.equal(hq.hq.core.receipts.some((receipt) => receipt.kind === 'hq.launch'), false);
     assert.equal(existsSync(join(root, 'Contents/host/members.sock')), false);
   } finally {
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an initial HQ profile refusal retains the HQ error', async () => {
+  const hq = await startHQ();
+  const proxy = await hqProxy(hq, ({ op, reply }) => op === 'Hello' && reply.ok
+    ? { id: reply.id, ok: false, refusal: { error: 'profile_insufficient', explanation: 'protected profile unavailable', correlation_id: 'corr_profile' } }
+    : reply);
+  const root = makeSoul();
+  const events = [];
+  try {
+    await assert.rejects(startSoul({ root, hqHome: proxy.home, requestedProfile: 'managed-protected', renewEveryMs: 0, log: (event) => events.push(event) }),
+      (error) => error.name === 'HqRefusal' && error.op === 'Hello' && error.code === 'profile_insufficient' && error.transport === false);
+    assert.deepEqual(events.find((event) => event.event === 'profile-refused'), { event: 'profile-refused', code: 'profile_insufficient', source: 'hq', requested_profile: 'managed-protected' });
+    assert.equal(existsSync(join(root, 'Contents/host/members.sock')), false);
+  } finally {
+    await proxy.done();
     await hq.done();
     rmSync(root, { recursive: true, force: true });
   }
@@ -120,14 +141,17 @@ test('a protected grant never falls back to local launch even when the request w
   }
 });
 
-test('a protected Soul latches a cooperative re-admission unavailable and stops its members', { timeout: 30_000 }, async () => {
+for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Soul fences members after ${refusal} on re-admission`, { timeout: 30_000 }, async () => {
   const isolated = accountHQ();
   const hq = await startHQ(isolated.options);
   let releasePromptReply;
   let markPromptReplyHeld;
   const promptReplyHeld = new Promise((resolve) => { markPromptReplyHeld = resolve; });
   const proxy = await hqProxy(hq, ({ op, reply, count }) => {
-    if (op === 'Hello' && reply.ok) return { ...reply, result: { ...reply.result, profile: count === 1 ? 'managed-protected' : 'managed-cooperative', warnings: [] } };
+    if (op === 'Hello' && reply.ok) {
+      if (count > 1 && refusal === 'HQ refusal') return { id: reply.id, ok: false, refusal: { error: 'profile_insufficient', explanation: 'protected profile unavailable', correlation_id: 'corr_profile' } };
+      return { ...reply, result: { ...reply.result, profile: count === 1 ? 'managed-protected' : 'managed-cooperative', warnings: [] } };
+    }
     if (op === 'session/prompt' && count === 2) return new Promise((resolve) => {
       releasePromptReply = () => resolve(reply);
       markPromptReplyHeld();
@@ -147,14 +171,20 @@ test('a protected Soul latches a cooperative re-admission unavailable and stops 
     const renewal = soul.renew();
     while (soul.status().state !== 'unavailable') await new Promise((resolve) => setImmediate(resolve));
     releasePromptReply();
-    await assert.rejects(renewal, (error) => error instanceof SoulUnavailable && /managed-cooperative.*managed-protected/.test(error.reason));
+    await assert.rejects(renewal, (error) => error.code === 'profile_insufficient' && (refusal === 'HQ refusal' ? error.name === 'HqRefusal' && error.op === 'Hello' : error instanceof SoulUnavailable && /managed-cooperative.*managed-protected/.test(error.reason)));
     await Promise.allSettled([inFlight]);
     const status = soul.status();
-    assert.deepEqual([status.state, status.profile], ['unavailable', 'managed-cooperative']);
+    assert.deepEqual([status.state, status.profile, status.code], ['unavailable', refusal === 'HQ refusal' ? undefined : 'managed-cooperative', 'profile_insufficient']);
+    const event = soul.events().find((row) => row.event === 'profile-refused');
+    assert.equal(event.code, 'profile_insufficient');
+    assert.equal(event.source, refusal === 'HQ refusal' ? 'hq' : 'local');
     assert.ok(status.members.every((member) => !member.running && member.runtime_id === undefined));
-    await assert.rejects(soul.prompt('must stay fenced'), (error) => error instanceof SoulUnavailable && error.state === 'unavailable');
-    assert.throws(() => soul.release(), (error) => error instanceof SoulUnavailable && error.state === 'unavailable');
+    await assert.rejects(soul.prompt('must stay fenced'), (error) => error instanceof SoulUnavailable && error.state === 'unavailable' && error.code === 'profile_insufficient' && /profile_insufficient/.test(error.message));
+    assert.throws(() => soul.release(), (error) => error instanceof SoulUnavailable && error.state === 'unavailable' && error.code === 'profile_insufficient');
     assert.equal(soul.events().filter((event) => event.event === 'member-started').length, 1, 'no member restarted after the downgrade');
+    await soul.stop();
+    assert.equal(soul.status().state, 'stopped');
+    assert.equal(soul.status().code, undefined);
   } finally {
     await soul?.stop().catch(() => {});
     await proxy.done();
