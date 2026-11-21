@@ -8,6 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, Server } from 'node:net';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
 import { connectHq } from '../lib/hq-client.mjs';
@@ -438,10 +439,10 @@ test('an attach-time account launch failure falls back locally only in the coope
 
 test('an isolated member endpoint withholds bridge bootstrap and refuses attach fallback', { timeout: 10000 }, async () => {
   const isolated = accountHQ();
-  const hq = await startHQ(isolated.options);
-  const memberRoot = mkdtempSync('/private/tmp/sm-');
+  const memberRoot = realpathSync(mkdtempSync(join(tmpdir(), 'sm-')));
   const directory = join(memberRoot, 'start');
   mkdirSync(directory);
+  const hq = await startHQ(isolated.options);
   chownSync(directory, process.geteuid(), process.getgid());
   chmodSync(directory, 0o2750);
   let runnerToken;
