@@ -49,11 +49,17 @@ The entry point supplies only the member token; HQ derives the member ID,
 role and both socket paths from the admitted runtime and verified account.
 Adapter-defined environment variables are refused instead of silently dropped.
 
-For the current pilot, HQ and the Soul entry point share the host UID, so the
-entry point can bind the returned path inside HQ's harness endpoint directory.
-The later dedicated-HQ-account move must replace that transitional ownership
-with an HQ-owned proxy or a separately provisioned entry-point directory. This
-integration does not claim that service-account boundary is complete.
+The current pilot shares a host UID for HQ and the Soul entry point. A
+separate per-installation Soul-runner UID needs a per-start member directory
+provisioned for that runner, with the exact harness credential group allowed
+to connect. The optional `member_endpoint` launch reply describes that
+directory without giving the runner the credential broker path. The entry
+point checks the directory owner, group, mode, canonical path and inode
+before and after binding the socket. It does
+not create the directory or treat the reply as a Machine start receipt.
+Machine must authenticate and provision the one-use account/path assignment.
+The production route also needs kernel peer identity verification and a
+race-resistant directory handoff; this parser alone does not enable it.
 
 `--profile managed-protected` requests protected operation and fails before
 an adapter starts if HQ grants a weaker profile or account launch cannot be
@@ -112,7 +118,11 @@ the launch account boundary still needs independent enforcement.
 
 It writes `host/members.sock` (0600, in a 0700 directory) for cooperative
 local fallback. An HQ launch gets a per-launch 0660 member socket in the
-harness account's verified endpoint directory; the entry point bounds
+harness account's verified endpoint directory in the current pilot. A
+separate-runner launch may supply `member_endpoint` with `directory`,
+`owner_uid`, `group_gid`, `dir_mode` (2750) and `socket_mode` (660),
+alongside `member_socket`. This route refuses local adapter
+fallback if attach fails. The entry point bounds
 unauthenticated connections, requires the member token within five seconds,
 and removes the socket on stop. It also writes `comms/notes/<note_id>.json`
 and, for local fallback, each member's `home/<member>/`.

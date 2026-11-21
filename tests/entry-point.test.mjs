@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, Server } from 'node:net';
 import { join } from 'node:path';
 import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
@@ -748,7 +748,7 @@ test('a failed bind leaves the path reported in use untouched', async (ctx) => {
   const t = await setup();
   try {
     await t.soul.stop();
-    const path = join(t.contents, 'host/members.sock');
+    const path = join(realpathSync(t.contents), 'host/members.sock');
     const original = Server.prototype.listen;
     const listener = ctx.mock.method(Server.prototype, 'listen', function (...args) {
       if (args[0] !== path) return original.apply(this, args);
