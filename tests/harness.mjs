@@ -2,7 +2,7 @@
 // plugin serving broker.sock, a Soul package in a temporary directory whose
 // members run the fake adapter, and the entry point started on it.
 import { spawn as nodeSpawn } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -103,8 +103,9 @@ export function accountLaunch(layout, sandboxProfile) {
     let args = requestedArgs;
     if (sandboxProfile && requestedArgs[1] === '-H') {
       // Keep the requested sudo argv in calls. Wrap only the member command.
-      const broker = options.env.AGENT_BOT_SOULS_BROKER;
-      const member = options.env.AGENT_BOT_SOULS_SOCKET;
+      // Seatbelt matches canonical socket paths; macOS TMPDIR often starts at /var.
+      const broker = realpathSync(options.env.AGENT_BOT_SOULS_BROKER);
+      const member = realpathSync(options.env.AGENT_BOT_SOULS_SOCKET);
       args = [...requestedArgs.slice(0, split + 1), '/usr/bin/sandbox-exec', '-f', sandboxProfile,
         '-D', 'BROKER_SOCKET=' + broker, '-D', 'MEMBER_SOCKET=' + member, ...requestedArgs.slice(split + 1)];
     }
