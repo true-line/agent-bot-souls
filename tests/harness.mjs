@@ -50,7 +50,7 @@ export async function hqProxy(hq, transformReply = ({ reply }) => reply) {
     const close = () => { client.destroy(); upstream.destroy(); };
     for (const socket of [client, upstream]) {
       socket.on('error', close);
-      socket.on('close', () => sockets.delete(socket));
+      socket.on('close', () => { sockets.delete(socket); close(); });
     }
     readLines(client, (line) => {
       const request = JSON.parse(line);
