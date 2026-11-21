@@ -36,8 +36,13 @@ const MEMBER_OPS = {
 
 function options(argv) {
   const out = {};
-  for (let i = 0; i < argv.length; i += 1) {
-    if (argv[i] === '--soul' || argv[i] === '--hq-home' || argv[i] === '--profile') { out[argv[i].slice(2)] = argv[i + 1]; i += 1; } else throw new Error(`unknown argument ${argv[i]}`);
+  const optionsWithValues = ['--soul', '--hq-home', '--profile'];
+  for (let i = 0; i < argv.length; i += 2) {
+    const option = argv[i];
+    if (!optionsWithValues.includes(option)) throw new Error(`unknown argument ${option}`);
+    const value = argv[i + 1];
+    if (!value || optionsWithValues.includes(value)) throw new Error(`${option} requires a value`);
+    out[option.slice(2)] = value;
   }
   if (!out.soul) throw new Error('--soul DIR is required');
   return { root: out.soul, hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq'), requestedProfile: out.profile ?? 'managed-cooperative' };

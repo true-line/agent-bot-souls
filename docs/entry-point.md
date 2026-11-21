@@ -57,7 +57,8 @@ integration does not claim that service-account boundary is complete.
 
 `--profile managed-protected` requests protected operation and fails before
 an adapter starts if HQ grants a weaker profile or account launch cannot be
-used. The default `managed-cooperative` request preserves existing hosts: it
+used. Omitting `--profile` selects the default. Supplying it without a value stops startup before HQ admission.
+The default `managed-cooperative` request preserves existing hosts: it
 uses local spawn only when HQ explicitly reports `host.launch_unavailable`.
 Before request-time fallback it proves the admitted runtime may use HQ's
 shared broker; an account-bound runtime with no returned endpoint fails
