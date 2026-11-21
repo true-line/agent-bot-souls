@@ -94,12 +94,20 @@ export async function hqProxy(hq, transformReply = ({ reply }) => reply) {
 // Execute HQ's exact injected sudo argv as this test user. The real-account
 // kernel boundary remains HQ's CI lane; this gives Souls a real pinned HQ,
 // real launch/attach streams, the fixed wrapper, and real adapter processes.
-export function accountLaunch(layout) {
+export function accountLaunch(layout, sandboxProfile) {
   const calls = [];
-  const spawn = (file, args, options) => {
+  const spawn = (file, requestedArgs, options) => {
     if (file !== '/usr/bin/sudo') throw new Error(`unexpected launcher ${file}`);
-    const split = args.indexOf('--');
-    if (split === -1 || !args[split + 1]) throw new Error(`unexpected sudo argv ${JSON.stringify(args)}`);
+    const split = requestedArgs.indexOf('--');
+    if (split === -1 || !requestedArgs[split + 1]) throw new Error(`unexpected sudo argv ${JSON.stringify(requestedArgs)}`);
+    let args = requestedArgs;
+    if (sandboxProfile && requestedArgs[1] === '-H') {
+      // Keep the requested sudo argv in calls. Wrap only the member command.
+      const broker = options.env.AGENT_BOT_SOULS_BROKER;
+      const member = options.env.AGENT_BOT_SOULS_SOCKET;
+      args = [...requestedArgs.slice(0, split + 1), '/usr/bin/sandbox-exec', '-f', sandboxProfile,
+        '-D', 'BROKER_SOCKET=' + broker, '-D', 'MEMBER_SOCKET=' + member, ...requestedArgs.slice(split + 1)];
+    }
     const account = args[1] === '-H' ? args[3] : args[2];
     const launch = args[1] === '-H';
     // The Linux HQ fixture emits /bin/true for its account probe. macOS
@@ -109,14 +117,14 @@ export function accountLaunch(layout) {
       ...options,
       ...(launch ? { env: { ...options.env, HOME: layout.homes[account] } } : {}),
     });
-    calls.push({ file, args, options, child });
+    calls.push({ file, args: requestedArgs, options, child });
     return child;
   };
   return { spawn, calls };
 }
 
-export function accountHQ(layout = harnessLayout()) {
-  const launch = accountLaunch(layout);
+export function accountHQ(layout = harnessLayout(), sandboxProfile) {
+  const launch = accountLaunch(layout, sandboxProfile);
   return {
     layout,
     launch,
