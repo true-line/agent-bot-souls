@@ -68,6 +68,14 @@ fallback uses that account endpoint.
 It never approves a permission request from an adapter. It answers
 `cancelled`, because approvals are HQ's records of the owner's decisions.
 
+On the ACP front door, `session/cancel` applies to the named session's
+oldest unfinished prompt. A queued prompt is removed and completes as
+`cancelled` while the active turn continues. For a running prompt the entry
+point forwards the notification and waits for the adapter's result. An ACP
+request-cancelled error confirms cancellation. Other errors and uncertain
+outcomes from earlier attempts can still reach the client. Cancellation
+prevents further automatic prompt retries.
+
 ## Files it reads
 
 Everything is under `<package>/Contents/`
