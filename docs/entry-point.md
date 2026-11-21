@@ -102,7 +102,9 @@ root downward: an ancestor must be owned by root or the runtime account and
 must not be writable by another account, except for a sticky shared directory
 whose next component belongs to root or the runtime account. This prevents
 another account from replacing a parent between validation and a later path
-operation.
+operation. On macOS the guard also reads native ACL entries and refuses any
+allow entry on those custody paths; deny-only entries remain valid. An
+unavailable or unparseable ACL listing fails closed.
 An owner-owned Soul therefore cannot be run directly under a different HQ
 account. These path checks do not make running untrusted Soul code as HQ safe;
 the launch account boundary still needs independent enforcement.

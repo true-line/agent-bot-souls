@@ -1,6 +1,7 @@
 // What the entry point reads from a Soul package, and the typed notes it
 // keeps in comms/ (soul-contracts records/v1 typed-note).
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -95,6 +96,19 @@ test('a replaceable ancestor is refused before host state changes', () => {
     renameSync(root, moved);
     assert.throws(() => readSoul(moved), (e) => e instanceof SoulError && /Soul ancestry: writable parent/.test(e.message));
     assert.equal(statSync(join(moved, 'Contents/host')).mode & 0o777, 0o755);
+    assert.equal(existsSync(join(moved, 'Contents/host/installation.json')), false);
+  } finally { rmSync(scratch, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a macOS ACL grant on an ancestor is refused before host state changes', { skip: process.platform !== 'darwin' }, () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'soul-acl-'));
+  const root = makeSoul({});
+  const moved = join(scratch, 'candidate');
+  try {
+    const chmod = spawnSync('/bin/chmod', ['+a', 'everyone allow delete_child', scratch], { encoding: 'utf8' });
+    assert.equal(chmod.status, 0, chmod.stderr);
+    renameSync(root, moved);
+    assert.throws(() => readSoul(moved), (e) => e instanceof SoulError && /Soul ancestry: ACL may grant/.test(e.message));
     assert.equal(existsSync(join(moved, 'Contents/host/installation.json')), false);
   } finally { rmSync(scratch, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }); }
 });
