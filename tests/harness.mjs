@@ -96,29 +96,28 @@ export async function hqProxy(hq, transformReply = ({ reply }) => reply) {
 // real launch/attach streams, the fixed wrapper, and real adapter processes.
 export function accountLaunch(layout, sandboxProfile) {
   const calls = [];
-  const spawn = (file, args, options) => {
+  const spawn = (file, requestedArgs, options) => {
     if (file !== '/usr/bin/sudo') throw new Error(`unexpected launcher ${file}`);
-    const split = args.indexOf('--');
-    if (split === -1 || !args[split + 1]) throw new Error(`unexpected sudo argv ${JSON.stringify(args)}`);
-    const account = args[1] === '-H' ? args[3] : args[2];
-    const launch = args[1] === '-H';
-    // The pinned Linux probe is /bin/true; macOS ships that utility under /usr/bin.
-    const program = args[split + 1];
-    let executable = !launch && process.platform === 'darwin' && program === '/bin/true' ? '/usr/bin/true' : program;
-    let childArgs = args.slice(split + 2);
-    if (launch && sandboxProfile) {
-      // These paths come from HQ's launch record, before the child runs.
+    const split = requestedArgs.indexOf('--');
+    if (split === -1 || !requestedArgs[split + 1]) throw new Error(`unexpected sudo argv ${JSON.stringify(requestedArgs)}`);
+    let args = requestedArgs;
+    if (sandboxProfile && requestedArgs[1] === '-H') {
+      // Keep the requested sudo argv in calls. Wrap only the member command.
       const broker = options.env.AGENT_BOT_SOULS_BROKER;
       const member = options.env.AGENT_BOT_SOULS_SOCKET;
-      childArgs = ['-f', sandboxProfile, '-D', 'BROKER_SOCKET=' + broker,
-        '-D', 'MEMBER_SOCKET=' + member, executable, ...childArgs];
-      executable = '/usr/bin/sandbox-exec';
+      args = [...requestedArgs.slice(0, split + 1), '/usr/bin/sandbox-exec', '-f', sandboxProfile,
+        '-D', 'BROKER_SOCKET=' + broker, '-D', 'MEMBER_SOCKET=' + member, ...requestedArgs.slice(split + 1)];
     }
-    const child = nodeSpawn(executable, childArgs, {
+    const account = args[1] === '-H' ? args[3] : args[2];
+    const launch = args[1] === '-H';
+    // The Linux HQ fixture emits /bin/true for its account probe. macOS
+    // installs the same utility in /usr/bin; retain the original argv in calls.
+    const program = process.platform === 'darwin' && !launch && args[split + 1] === '/bin/true' ? '/usr/bin/true' : args[split + 1];
+    const child = nodeSpawn(program, args.slice(split + 2), {
       ...options,
       ...(launch ? { env: { ...options.env, HOME: layout.homes[account] } } : {}),
     });
-    calls.push({ file, args, options, child });
+    calls.push({ file, args: requestedArgs, options, child });
     return child;
   };
   return { spawn, calls };
