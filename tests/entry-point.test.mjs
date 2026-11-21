@@ -142,7 +142,9 @@ test('a protected grant never falls back to local launch even when the request w
   }
 });
 
-for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Soul fences members after ${refusal} on re-admission`, { timeout: 30_000 }, async () => {
+for (const refusal of ['cooperative grant', 'HQ refusal', 'HQ refusal with unconfirmed cleanup']) test(`a protected Soul fences members after ${refusal} on re-admission`, { timeout: 30_000 }, async () => {
+  const hqRefused = refusal !== 'cooperative grant';
+  const unconfirmed = refusal === 'HQ refusal with unconfirmed cleanup';
   const isolated = accountHQ();
   const hq = await startHQ(isolated.options);
   let releasePromptReply;
@@ -154,9 +156,10 @@ for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Sou
   const promptReplyHeld = new Promise((resolve) => { markPromptReplyHeld = resolve; });
   const proxy = await hqProxy(hq, ({ op, reply, count }) => {
     if (op === 'Hello' && reply.ok) {
-      if (count > 1 && refusal === 'HQ refusal') return { id: reply.id, ok: false, refusal: { error: 'profile_insufficient', explanation: 'protected profile unavailable', correlation_id: 'corr_profile' } };
+      if (count > 1 && hqRefused) return { id: reply.id, ok: false, refusal: { error: 'profile_insufficient', explanation: 'protected profile unavailable', correlation_id: 'corr_profile' } };
       return { ...reply, result: { ...reply.result, profile: count === 1 ? 'managed-protected' : 'managed-cooperative', warnings: [] } };
     }
+    if (op === 'launch.stop' && reply.ok && unconfirmed) return { ...reply, result: { ...reply.result, state: 'uncontained' } };
     if (holdUpdates && reply.method === 'session/update') return new Promise((resolve) => {
       releaseChunk = () => resolve(reply);
       markChunkHeld();
@@ -185,19 +188,22 @@ for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Sou
     const chunksAtFence = [...chunks];
     releaseChunk();
     releasePromptReply();
-    await assert.rejects(renewal, (error) => error.code === 'profile_insufficient' && (refusal === 'HQ refusal' ? error.name === 'HqRefusal' && error.op === 'Hello' : error instanceof SoulUnavailable && /managed-cooperative.*managed-protected/.test(error.reason)));
+    await assert.rejects(renewal, (error) => error.code === 'profile_insufficient' && (hqRefused ? error.name === 'HqRefusal' && error.op === 'Hello' : error instanceof SoulUnavailable && /managed-cooperative.*managed-protected/.test(error.reason)));
     await inFlight;
     assert.deepEqual(chunks, chunksAtFence, 'no chunks delivered after the profile fence');
     const status = soul.status();
-    assert.deepEqual([status.state, status.profile, status.code], ['unavailable', refusal === 'HQ refusal' ? undefined : 'managed-cooperative', 'profile_insufficient']);
+    assert.deepEqual([status.state, status.profile, status.code], ['unavailable', hqRefused ? undefined : 'managed-cooperative', 'profile_insufficient']);
     const event = soul.events().find((row) => row.event === 'profile-refused');
     assert.equal(event.code, 'profile_insufficient');
-    assert.equal(event.source, refusal === 'HQ refusal' ? 'hq' : 'local');
+    assert.equal(event.source, hqRefused ? 'hq' : 'local');
     assert.ok(status.members.every((member) => !member.running && member.runtime_id === undefined));
     await assert.rejects(soul.prompt('must stay fenced'), (error) => error instanceof SoulUnavailable && error.state === 'unavailable' && error.code === 'profile_insufficient' && /profile_insufficient/.test(error.message));
     assert.throws(() => soul.release(), (error) => error instanceof SoulUnavailable && error.state === 'unavailable' && error.code === 'profile_insufficient');
     assert.equal(soul.events().filter((event) => event.event === 'member-started').length, 1, 'no member restarted after the downgrade');
-    await soul.stop();
+    if (unconfirmed) {
+      assert.match(soul.events().find((row) => row.event === 'member-stop-failed')?.error, /m_lead.*uncontained/);
+      await assert.rejects(soul.stop(), /m_lead.*uncontained/);
+    } else await soul.stop();
     assert.equal(soul.status().state, 'stopped');
     assert.equal(soul.status().code, undefined);
   } finally {
