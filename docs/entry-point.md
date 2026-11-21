@@ -92,6 +92,24 @@ Exactly one member has the role `lead`. soul-package does not yet specify
 the fields of `SoulInfo.json` or `SoulLock.json`; the entry point reads only
 these and ignores the rest.
 
+Before using host state, the entry point requires the package root,
+`Contents/`, `host/`, and the state files to be real paths owned by its
+runtime account, with no group or other write access. It opens files without
+following their final symlinks and changes `host/` mode through an opened
+directory. If ownership or no-follow checks are unavailable, it refuses.
+It also checks every ancestor of the resolved package root from the filesystem
+root downward: an ancestor must be owned by root or the runtime account and
+must not be writable by another account, except for a sticky shared directory
+whose next component belongs to root or the runtime account. This prevents
+another account from replacing a parent between validation and a later path
+operation. On macOS the guard also reads native ACL entries through
+`/bin/ls -lde` and refuses any
+allow entry on those custody paths; deny-only entries remain valid. An
+unavailable or unparseable ACL listing fails closed.
+An owner-owned Soul therefore cannot be run directly under a different HQ
+account. These path checks do not make running untrusted Soul code as HQ safe;
+the launch account boundary still needs independent enforcement.
+
 It writes `host/members.sock` (0600, in a 0700 directory) for cooperative
 local fallback. An HQ launch gets a per-launch 0660 member socket in the
 harness account's verified endpoint directory; the entry point bounds

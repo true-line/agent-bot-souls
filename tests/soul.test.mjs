@@ -1,8 +1,10 @@
 // What the entry point reads from a Soul package, and the typed notes it
 // keeps in comms/ (soul-contracts records/v1 typed-note).
 import { test } from 'node:test';
+import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handoffs, readNotes, restrictions, writeNote } from '../lib/notes.mjs';
 import { readSoul, SoulError } from '../lib/soul.mjs';
@@ -26,6 +28,105 @@ test('a Soul package gives the Soul, its definition digest, its members and thei
   assert.equal(statSync(join(root, 'Contents/host')).mode & 0o777, 0o700);
   assert.equal(statSync(join(root, 'Contents/host/installation.json')).mode & 0o777, 0o600);
 }));
+
+test('a linked Contents or host directory is refused before host mode or external state changes', () => withSoul({}, (root) => {
+  const contents = join(root, 'Contents');
+  const realContents = join(root, 'real-contents');
+  renameSync(contents, realContents);
+  symlinkSync(realContents, contents, 'dir');
+  assert.throws(() => readSoul(root), (e) => e instanceof SoulError && /Contents.*real directory/.test(e.message));
+  assert.equal(statSync(join(realContents, 'host')).mode & 0o777, 0o755);
+  unlinkSync(contents);
+  renameSync(realContents, contents);
+
+  const host = join(contents, 'host');
+  const outside = mkdtempSync(join(tmpdir(), 'soul-host-victim-'));
+  try {
+    chmodSync(outside, 0o751);
+    writeFileSync(join(outside, 'installation.json'), 'do not change');
+    rmSync(host, { recursive: true });
+    symlinkSync(outside, host, 'dir');
+    assert.throws(() => readSoul(root), (e) => e instanceof SoulError && /host.*real directory/.test(e.message));
+    assert.equal(statSync(outside).mode & 0o777, 0o751);
+    assert.equal(readFileSync(join(outside, 'installation.json'), 'utf8'), 'do not change');
+  } finally { rmSync(outside, { recursive: true, force: true }); }
+}));
+
+test('linked host state files are refused, including a dangling installation link', () => withSoul({}, (root) => {
+  const host = join(root, 'Contents/host');
+  const outside = mkdtempSync(join(tmpdir(), 'soul-state-victim-'));
+  try {
+    const adapter = join(outside, 'adapters.json');
+    writeFileSync(adapter, readFileSync(join(host, 'adapters.json')));
+    unlinkSync(join(host, 'adapters.json'));
+    symlinkSync(adapter, join(host, 'adapters.json'));
+    assert.throws(() => readSoul(root), (e) => e instanceof SoulError && /host\/adapters.json.*real file/.test(e.message));
+    assert.equal(statSync(host).mode & 0o777, 0o755, 'a bad state file is refused before chmod');
+    assert.equal(existsSync(join(host, 'installation.json')), false);
+    unlinkSync(join(host, 'adapters.json'));
+    writeFileSync(join(host, 'adapters.json'), readFileSync(adapter));
+
+    const installation = join(outside, 'installation.json');
+    writeFileSync(installation, '{"installation_id":"inst_outside"}\n');
+    symlinkSync(installation, join(host, 'installation.json'));
+    assert.throws(() => readSoul(root), (e) => e instanceof SoulError && /host\/installation.json.*real file/.test(e.message));
+    assert.equal(statSync(host).mode & 0o777, 0o755, 'a linked installation is refused before chmod');
+    assert.equal(readFileSync(installation, 'utf8'), '{"installation_id":"inst_outside"}\n');
+    unlinkSync(join(host, 'installation.json'));
+    symlinkSync(join(outside, 'missing.json'), join(host, 'installation.json'));
+    assert.throws(() => readSoul(root), (e) => e instanceof SoulError && /host\/installation.json.*real file/.test(e.message));
+  } finally { rmSync(outside, { recursive: true, force: true }); }
+}));
+
+test('writable host custody is refused without chmod', () => withSoul({}, (root) => {
+  const host = join(root, 'Contents/host');
+  chmodSync(host, 0o777);
+  assert.throws(() => readSoul(root), (e) => e instanceof SoulError && /host.*group or other may write/.test(e.message));
+  assert.equal(statSync(host).mode & 0o777, 0o777);
+}));
+
+test('a replaceable ancestor is refused before host state changes', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'soul-ancestry-'));
+  const unprotected = join(scratch, 'shared');
+  const root = makeSoul({});
+  const moved = join(unprotected, 'candidate');
+  try {
+    mkdirSync(unprotected, { mode: 0o777 });
+    chmodSync(unprotected, 0o777);
+    renameSync(root, moved);
+    assert.throws(() => readSoul(moved), (e) => e instanceof SoulError && /Soul ancestry: writable parent/.test(e.message));
+    assert.equal(statSync(join(moved, 'Contents/host')).mode & 0o777, 0o755);
+    assert.equal(existsSync(join(moved, 'Contents/host/installation.json')), false);
+  } finally { rmSync(scratch, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('a macOS ACL grant on an ancestor is refused before host state changes', { skip: process.platform !== 'darwin' }, () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'soul-acl-'));
+  const root = makeSoul({});
+  const moved = join(scratch, 'candidate');
+  try {
+    const chmod = spawnSync('/bin/chmod', ['+a', 'everyone allow delete_child', scratch], { encoding: 'utf8' });
+    assert.equal(chmod.status, 0, chmod.stderr);
+    renameSync(root, moved);
+    assert.throws(() => readSoul(moved), (e) => e instanceof SoulError && /Soul ancestry: ACL may grant/.test(e.message));
+    assert.equal(existsSync(join(moved, 'Contents/host/installation.json')), false);
+  } finally { rmSync(scratch, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }); }
+});
+
+test('writable adapter and installation state is refused', () => {
+  withSoul({}, (root) => {
+    const host = join(root, 'Contents/host');
+    chmodSync(join(host, 'adapters.json'), 0o666);
+    assert.throws(() => readSoul(root), (e) => e instanceof SoulError && /host\/adapters.json.*group or other may write/.test(e.message));
+    assert.equal(existsSync(join(host, 'installation.json')), false);
+  });
+  withSoul({}, (root) => {
+    const host = join(root, 'Contents/host');
+    readSoul(root);
+    chmodSync(join(host, 'installation.json'), 0o666);
+    assert.throws(() => readSoul(root), (e) => e instanceof SoulError && /host\/installation.json.*group or other may write/.test(e.message));
+  });
+});
 
 test('fallbacks become the member\'s fail-over order, each with this host\'s command', () => {
   const info = { soul_id: SOUL, members: [{ member_id: 'm_lead', role: 'lead', adapter_id: 'a', adapter_version: '1.0.0', fallbacks: [{ adapter_id: 'b', adapter_version: '2.0.0' }] }] };
