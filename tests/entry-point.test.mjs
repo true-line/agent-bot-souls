@@ -15,6 +15,43 @@ import { accountHQ, DIGEST, fake, hqProxy, makeSoul, schema, setup, SOUL, startH
 const recoveries = (t) => t.soul.events().filter((e) => e.event === 'recovery').map((e) => [e.member_id, e.failure, e.action]);
 const finals = (t, taskId) => t.receipts('task.commit').filter((r) => r.task_id === taskId && r.status === 'completed');
 
+test('an adapter needs a session ID before its member reports Ready or prompts', async (suite) => {
+  for (const [name, reply] of [['missing', {}], ['empty', { sessionId: '' }], ['wrong type', { sessionId: 7 }]]) {
+    await suite.test(name, async () => {
+      const isolated = accountHQ();
+      const spawn = isolated.options.launch.spawn;
+      isolated.options.launch.spawn = (file, args, options) => {
+        if (options.env?.AGENT_BOT_SOULS_MEMBER_ID === 'm_lead') {
+          const scenario = JSON.stringify({ newSessionReply: reply, once: true });
+          options = { ...options, env: { ...options.env, FAKE_ADAPTER_SCENARIO: scenario } };
+        }
+        return spawn(file, args, options);
+      };
+      const beforeRetry = [];
+      let t;
+      try {
+        const delay = async () => {
+          beforeRetry.push({
+            ready: t.receipts('hq.ready').length,
+            started: t.soul.events().filter((e) => e.event === 'member-started').length,
+          });
+        };
+        t = await setup({ hq: isolated.options, runtime: { delay } });
+        const task = await t.offer();
+        await t.soul.prompt('start the member session');
+        assert.deepEqual(beforeRetry, [{ ready: 0, started: 0 }]);
+        assert.deepEqual(recoveries(t), [['m_lead', 'crash', 'restart']]);
+        assert.deepEqual(t.soul.events().filter((e) => e.event === 'member-started').map((e) => e.launch), ['hq', 'hq']);
+        assert.equal(t.receipts('hq.ready').length, 2);
+        assert.equal(finals(t, task).length, 1);
+      } finally {
+        if (t) await t.done();
+        isolated.layout.remove();
+      }
+    });
+  }
+});
+
 test('row 16b: the Soul uses HQ launch, its account member sockets, and HQ stop end to end', { timeout: 30_000 }, async () => {
   const isolated = accountHQ();
   let t;

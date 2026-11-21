@@ -102,7 +102,10 @@ export function accountLaunch(layout) {
     if (split === -1 || !args[split + 1]) throw new Error(`unexpected sudo argv ${JSON.stringify(args)}`);
     const account = args[1] === '-H' ? args[3] : args[2];
     const launch = args[1] === '-H';
-    const child = nodeSpawn(args[split + 1], args.slice(split + 2), {
+    // The Linux HQ fixture emits /bin/true for its account probe. macOS
+    // installs the same utility in /usr/bin; retain the original argv in calls.
+    const program = process.platform === 'darwin' && !launch && args[split + 1] === '/bin/true' ? '/usr/bin/true' : args[split + 1];
+    const child = nodeSpawn(program, args.slice(split + 2), {
       ...options,
       ...(launch ? { env: { ...options.env, HOME: layout.homes[account] } } : {}),
     });
