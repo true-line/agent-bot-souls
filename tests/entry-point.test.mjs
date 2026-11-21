@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, Server } from 'node:net';
 import { join } from 'node:path';
 import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
@@ -432,6 +432,51 @@ test('an attach-time account launch failure falls back locally only in the coope
     assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-started').map((event) => event.launch), ['local']);
   } finally {
     await t?.done();
+    isolated.layout.remove();
+  }
+});
+
+test('an isolated member endpoint refuses local fallback after attach reports unavailable', async () => {
+  const isolated = accountHQ();
+  const spawn = isolated.options.launch.spawn;
+  isolated.options.launch.spawn = (file, args, options) => {
+    if (args[1] === '-H') {
+      const error = new Error('injected account launch failure');
+      error.code = 'ENOENT';
+      throw error;
+    }
+    return spawn(file, args, options);
+  };
+  const hq = await startHQ(isolated.options);
+  const memberRoot = mkdtempSync('/private/tmp/sm-');
+  const directory = join(memberRoot, 'start');
+  mkdirSync(directory);
+  chownSync(directory, process.geteuid(), process.getgid());
+  chmodSync(directory, 0o2750);
+  const proxy = await hqProxy(hq, ({ op, reply }) => {
+    if (op !== 'launch' || !reply.ok) return reply;
+    const st = statSync(directory);
+    return { ...reply, result: {
+      ...reply.result,
+      member_socket: join(directory, 'member.sock'),
+      member_endpoint: { directory, owner_uid: st.uid, group_gid: st.gid, dir_mode: 0o2750, socket_mode: 0o660, peer_uids: [st.uid, st.uid + 1] },
+    } };
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await assert.rejects(soul.prompt('do not spawn this adapter locally'),
+      (error) => error.code === 'host.launch_unavailable');
+    assert.equal(soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+    assert.equal(existsSync(join(directory, 'member.sock')), false, 'the refused launch removes its member socket');
+    assert.equal(isolated.launch.calls.some((call) => call.file !== '/usr/bin/sudo'), false);
+  } finally {
+    await soul?.stop();
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(memberRoot, { recursive: true, force: true });
     isolated.layout.remove();
   }
 });

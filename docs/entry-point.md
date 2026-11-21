@@ -51,15 +51,18 @@ Adapter-defined environment variables are refused instead of silently dropped.
 
 The current pilot shares a host UID for HQ and the Soul entry point. A
 separate per-installation Soul-runner UID needs a per-start member directory
-provisioned for that runner, with the exact harness credential group allowed
-to connect. The optional `member_endpoint` launch reply describes that
-directory without giving the runner the credential broker path. The entry
+provisioned for that runner, with only the assigned bridge principal's group
+allowed to connect. The optional `member_endpoint` launch reply describes that
+directory without giving the runner the bridge's broker path. The entry
 point checks the directory owner, group, mode, canonical path and inode
 before and after binding the socket. It does
 not create the directory or treat the reply as a Machine start receipt.
 Machine must authenticate and provision the one-use account/path assignment.
-The production route also needs kernel peer identity verification and a
-race-resistant directory handoff; this parser alone does not enable it.
+For this route the entry point checks each accepted member connection's
+kernel peer UID against the assigned runner and bridge UIDs before it
+reads the member token. A race-resistant directory handoff and physical
+cross-UID verification remain production gates; this parser alone does not
+enable the route.
 
 `--profile managed-protected` requests protected operation and fails before
 an adapter starts if HQ grants a weaker profile or account launch cannot be
@@ -120,7 +123,8 @@ It writes `host/members.sock` (0600, in a 0700 directory) for cooperative
 local fallback. An HQ launch gets a per-launch 0660 member socket in the
 harness account's verified endpoint directory in the current pilot. A
 separate-runner launch may supply `member_endpoint` with `directory`,
-`owner_uid`, `group_gid`, `dir_mode` (2750) and `socket_mode` (660),
+`owner_uid`, `group_gid`, `dir_mode` (2750), `socket_mode` (660) and
+`peer_uids` (the distinct runner and bridge UIDs),
 alongside `member_socket`. This route refuses local adapter
 fallback if attach fails. The entry point bounds
 unauthenticated connections, requires the member token within five seconds,
