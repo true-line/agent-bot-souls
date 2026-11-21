@@ -145,6 +145,10 @@ for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Sou
   const isolated = accountHQ();
   const hq = await startHQ(isolated.options);
   let releasePromptReply;
+  let releaseChunk;
+  let markChunkHeld;
+  let holdUpdates = false;
+  const chunkHeld = new Promise((resolve) => { markChunkHeld = resolve; });
   let markPromptReplyHeld;
   const promptReplyHeld = new Promise((resolve) => { markPromptReplyHeld = resolve; });
   const proxy = await hqProxy(hq, ({ op, reply, count }) => {
@@ -152,6 +156,10 @@ for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Sou
       if (count > 1 && refusal === 'HQ refusal') return { id: reply.id, ok: false, refusal: { error: 'profile_insufficient', explanation: 'protected profile unavailable', correlation_id: 'corr_profile' } };
       return { ...reply, result: { ...reply.result, profile: count === 1 ? 'managed-protected' : 'managed-cooperative', warnings: [] } };
     }
+    if (holdUpdates && reply.method === 'session/update') return new Promise((resolve) => {
+      releaseChunk = () => resolve(reply);
+      markChunkHeld();
+    });
     if (op === 'session/prompt' && count === 2) return new Promise((resolve) => {
       releasePromptReply = () => resolve(reply);
       markPromptReplyHeld();
@@ -165,14 +173,20 @@ for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Sou
     await soul.prompt('start the protected lead');
     assert.ok(soul.status().members.some((member) => member.running));
 
-    const inFlight = soul.prompt('this reply races the downgrade');
-    await promptReplyHeld;
+    holdUpdates = true;
+    const chunks = [];
+    const inFlight = assert.rejects(soul.prompt('this reply races the downgrade', (chunk) => chunks.push(chunk)),
+      (error) => error instanceof SoulUnavailable && error.code === 'profile_insufficient');
+    await Promise.all([promptReplyHeld, chunkHeld]);
     hq.clock.advance(60_001);
     const renewal = soul.renew();
     while (soul.status().state !== 'unavailable') await new Promise((resolve) => setImmediate(resolve));
+    const chunksAtFence = [...chunks];
+    releaseChunk();
     releasePromptReply();
     await assert.rejects(renewal, (error) => error.code === 'profile_insufficient' && (refusal === 'HQ refusal' ? error.name === 'HqRefusal' && error.op === 'Hello' : error instanceof SoulUnavailable && /managed-cooperative.*managed-protected/.test(error.reason)));
-    await Promise.allSettled([inFlight]);
+    await inFlight;
+    assert.deepEqual(chunks, chunksAtFence, 'no chunks delivered after the profile fence');
     const status = soul.status();
     assert.deepEqual([status.state, status.profile, status.code], ['unavailable', refusal === 'HQ refusal' ? undefined : 'managed-cooperative', 'profile_insufficient']);
     const event = soul.events().find((row) => row.event === 'profile-refused');
@@ -186,6 +200,47 @@ for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Sou
     assert.equal(soul.status().state, 'stopped');
     assert.equal(soul.status().code, undefined);
   } finally {
+    await soul?.stop().catch(() => {});
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+test('a delayed member restart cannot re-admit after a profile refusal', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let helloCount = 0;
+  const proxy = await hqProxy(hq, ({ op, reply, count }) => {
+    if (op === 'Hello' && reply.ok) {
+      helloCount += 1;
+      return { ...reply, result: { ...reply.result, profile: helloCount === 1 ? 'managed-protected' : 'managed-cooperative', warnings: [] } };
+    }
+    if (op === 'session/prompt' && count === 2) return { jsonrpc: '2.0', id: reply.id, error: { code: -32603, message: 'adapter disconnected', data: { closed: true } } };
+    return reply;
+  });
+  const root = makeSoul();
+  let releaseDelay;
+  let signalDelay;
+  const delayStarted = new Promise((resolve) => { signalDelay = resolve; });
+  const delay = () => new Promise((resolve) => { releaseDelay = resolve; signalDelay(); });
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, requestedProfile: 'managed-protected', renewEveryMs: 0, delay });
+    await soul.prompt('start the lead');
+    const turn = assert.rejects(soul.prompt('wait for a restart'), (error) => error instanceof SoulUnavailable && error.code === 'profile_insufficient');
+    await delayStarted;
+    hq.clock.advance(60_001);
+    await assert.rejects(soul.renew(), (error) => error.code === 'profile_insufficient');
+    assert.equal(helloCount, 2);
+    releaseDelay();
+    await turn;
+    assert.equal(helloCount, 2, 'delayed recovery must not issue another Hello');
+    assert.equal(soul.status().state, 'unavailable');
+    assert.ok(soul.status().members.every((member) => !member.running && member.runtime_id === undefined));
+  } finally {
+    releaseDelay?.();
     await soul?.stop().catch(() => {});
     await proxy.done();
     await hq.done();
