@@ -436,6 +436,19 @@ test('an attach-time account launch failure falls back locally only in the coope
   }
 });
 
+test('HQ-started mode refuses cooperative local adapter fallback', async () => {
+  let t;
+  try {
+    t = await setup({ runtime: { env: { ...process.env, AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH: '1' } } });
+    await assert.rejects(t.soul.prompt('do not run an adapter in HQ account'),
+      (error) => error instanceof SoulUnavailable && error.code === 'host.launch_unavailable'
+        && /local fallback is disabled/.test(error.reason));
+    assert.equal(t.soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+    assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-launch-fallback-refused').map((event) => event.member_id), ['m_lead']);
+    assert.equal(t.receipts('hq.launch').length, 0);
+  } finally { await t?.done(); }
+});
+
 test('a request-time account launch refusal fails before starting a broken local fallback', async () => {
   const isolated = accountHQ();
   const spawn = isolated.options.launch.spawn;
