@@ -97,6 +97,12 @@ Before using host state, the entry point requires the package root,
 runtime account, with no group or other write access. It opens files without
 following their final symlinks and changes `host/` mode through an opened
 directory. If ownership or no-follow checks are unavailable, it refuses.
+It also checks every ancestor of the resolved package root from the filesystem
+root downward: an ancestor must be owned by root or the runtime account and
+must not be writable by another account, except for a sticky shared directory
+whose next component belongs to root or the runtime account. This prevents
+another account from replacing a parent between validation and a later path
+operation.
 An owner-owned Soul therefore cannot be run directly under a different HQ
 account. These path checks do not make running untrusted Soul code as HQ safe;
 the launch account boundary still needs independent enforcement.

@@ -2,7 +2,7 @@
 // keeps in comms/ (soul-contracts records/v1 typed-note).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { handoffs, readNotes, restrictions, writeNote } from '../lib/notes.mjs';
@@ -83,6 +83,21 @@ test('writable host custody is refused without chmod', () => withSoul({}, (root)
   assert.throws(() => readSoul(root), (e) => e instanceof SoulError && /host.*group or other may write/.test(e.message));
   assert.equal(statSync(host).mode & 0o777, 0o777);
 }));
+
+test('a replaceable ancestor is refused before host state changes', () => {
+  const scratch = mkdtempSync(join(tmpdir(), 'soul-ancestry-'));
+  const unprotected = join(scratch, 'shared');
+  const root = makeSoul({});
+  const moved = join(unprotected, 'candidate');
+  try {
+    mkdirSync(unprotected, { mode: 0o777 });
+    chmodSync(unprotected, 0o777);
+    renameSync(root, moved);
+    assert.throws(() => readSoul(moved), (e) => e instanceof SoulError && /Soul ancestry: writable parent/.test(e.message));
+    assert.equal(statSync(join(moved, 'Contents/host')).mode & 0o777, 0o755);
+    assert.equal(existsSync(join(moved, 'Contents/host/installation.json')), false);
+  } finally { rmSync(scratch, { recursive: true, force: true }); rmSync(root, { recursive: true, force: true }); }
+});
 
 test('writable adapter and installation state is refused', () => {
   withSoul({}, (root) => {
