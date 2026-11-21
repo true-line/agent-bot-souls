@@ -23,4 +23,6 @@ with socket.socket(fileno=3) as sock:
     if sock.family != socket.AF_UNIX or sock.getsockopt(socket.SOL_SOCKET, socket.SO_TYPE) != socket.SOCK_STREAM:
         sys.exit(1)
     uid = peer_uid(sock)
-    sys.exit(0 if uid in {int(value) for value in sys.argv[2:]} else 1)
+    if uid not in {int(value) for value in sys.argv[2:]}:
+        sys.exit(1)
+    print(uid)

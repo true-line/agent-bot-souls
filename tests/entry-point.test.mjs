@@ -436,42 +436,52 @@ test('an attach-time account launch failure falls back locally only in the coope
   }
 });
 
-test('an isolated member endpoint refuses local fallback after attach reports unavailable', async () => {
+test('an isolated member endpoint withholds bridge bootstrap and refuses attach fallback', { timeout: 10000 }, async () => {
   const isolated = accountHQ();
-  const spawn = isolated.options.launch.spawn;
-  isolated.options.launch.spawn = (file, args, options) => {
-    if (args[1] === '-H') {
-      const error = new Error('injected account launch failure');
-      error.code = 'ENOENT';
-      throw error;
-    }
-    return spawn(file, args, options);
-  };
   const hq = await startHQ(isolated.options);
   const memberRoot = mkdtempSync('/private/tmp/sm-');
   const directory = join(memberRoot, 'start');
   mkdirSync(directory);
   chownSync(directory, process.geteuid(), process.getgid());
   chmodSync(directory, 0o2750);
-  const proxy = await hqProxy(hq, ({ op, reply }) => {
+  let runnerToken;
+  let releaseAttach;
+  let attachObserved;
+  const attached = new Promise((resolve) => { attachObserved = resolve; });
+  const proxy = await hqProxy(hq, ({ op, request, reply }) => {
     if (op !== 'launch' || !reply.ok) return reply;
+    runnerToken = request.payload.env.AGENT_BOT_SOULS_MEMBER_TOKEN;
     const st = statSync(directory);
     return { ...reply, result: {
       ...reply.result,
       member_socket: join(directory, 'member.sock'),
       member_endpoint: { directory, owner_uid: st.uid, group_gid: st.gid, dir_mode: 0o2750, socket_mode: 0o660, peer_uids: [st.uid, st.uid + 1] },
     } };
-  });
+  }, { interceptRequest: (request) => request.op === 'launch.attach' ? new Promise((resolve) => {
+    releaseAttach = () => resolve({ id: request.id, ok: false,
+      host_refusal: { code: 'host.launch_unavailable', explanation: 'injected attach refusal' } });
+    attachObserved();
+  }) : undefined });
   const root = makeSoul();
   let soul;
   try {
     soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
-    await assert.rejects(soul.prompt('do not spawn this adapter locally'),
+    const prompt = soul.prompt('do not spawn this adapter locally');
+    prompt.catch(() => {});
+    await attached;
+    const member = await connectHq(join(directory, 'member.sock'));
+    try {
+      await member.request('hello', { token: runnerToken });
+      await assert.rejects(member.request('runtime'), (error) => error.code === 'souls.unknown_member');
+    } finally { await member.close(); }
+    releaseAttach();
+    await assert.rejects(prompt,
       (error) => error.code === 'host.launch_unavailable');
     assert.equal(soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
     assert.equal(existsSync(join(directory, 'member.sock')), false, 'the refused launch removes its member socket');
     assert.equal(isolated.launch.calls.some((call) => call.file !== '/usr/bin/sudo'), false);
   } finally {
+    releaseAttach?.();
     await soul?.stop();
     await proxy.done();
     await hq.done();

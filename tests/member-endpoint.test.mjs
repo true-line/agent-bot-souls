@@ -25,6 +25,7 @@ test('a separately provisioned member socket binds the runner-owned bridge-group
     };
     assert.equal(memberEndpoint(launch).broker, undefined, 'the runner receives no bridge broker path');
     assert.equal(memberEndpoint(launch).path, join(directory, 'member.sock'));
+    assert.equal(memberEndpoint(launch).bridgeUid, process.geteuid() + 1);
     assert.throws(() => memberEndpoint({ ...launch, member_endpoint: { ...launch.member_endpoint, broker_socket: join(root, 'broker.sock') } }), /unsupported field/);
     assert.throws(() => memberEndpoint({ ...launch, member_endpoint: { ...launch.member_endpoint, owner_uid: process.geteuid() + 1 } }), /invalid runner/);
     assert.throws(() => memberEndpoint({ ...launch, member_endpoint: { ...launch.member_endpoint, peer_uids: [process.geteuid(), process.geteuid()] } }), /peer UIDs/);
@@ -52,8 +53,11 @@ test('the member peer helper reads kernel UID from the accepted stream', async (
   const result = new Promise((resolve, reject) => {
     server = createServer({ pauseOnConnect: true }, async (socket) => {
       try {
-        assert.equal(await authenticateMemberPeer(socket, [process.geteuid() + 1]), false);
-        assert.equal(await authenticateMemberPeer(socket, [process.geteuid()]), true);
+        assert.equal(await authenticateMemberPeer(socket, [process.geteuid() + 1]).done, null);
+        assert.equal(await authenticateMemberPeer(socket, [process.geteuid()]).done, process.geteuid());
+        const pending = authenticateMemberPeer(socket, [process.geteuid()]);
+        pending.abort();
+        assert.equal(await pending.done, null, 'abort joins the helper before socket cleanup');
         resolve();
       } catch (error) { reject(error); }
       finally { socket.destroy(); }

@@ -60,9 +60,12 @@ not create the directory or treat the reply as a Machine start receipt.
 Machine must authenticate and provision the one-use account/path assignment.
 For this route the entry point checks each accepted member connection's
 kernel peer UID against the assigned runner and bridge UIDs before it
-reads the member token. A race-resistant directory handoff and physical
-cross-UID verification remain production gates; this parser alone does not
-enable the route.
+reads the member token. The runner token can use ordinary member operations
+but cannot request runtime bootstrap or the channel binding; those require
+the bridge UID and a separate bridge token. Handoff of that token to the
+bridge over the reviewed fixed launch pipe, a race-resistant directory
+handoff, and physical cross-UID verification remain production gates. This
+parser alone does not enable the route.
 
 `--profile managed-protected` requests protected operation and fails before
 an adapter starts if HQ grants a weaker profile or account launch cannot be
@@ -128,7 +131,8 @@ separate-runner launch may supply `member_endpoint` with `directory`,
 alongside `member_socket`. This route refuses local adapter
 fallback if attach fails. The entry point bounds
 unauthenticated connections, requires the member token within five seconds,
-and removes the socket on stop. It also writes `comms/notes/<note_id>.json`
+and joins in-flight kernel peer checks before removing the socket on stop. It
+also writes `comms/notes/<note_id>.json`
 and, for local fallback, each member's `home/<member>/`.
 
 ## What a member can ask
