@@ -208,6 +208,53 @@ for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Sou
   }
 });
 
+for (const held of ['Hello grant', 'Hello refusal', 'Equip', 'Ready']) test(`shutdown fences a pending ${held} during re-admission`, { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let release;
+  let signalHeld;
+  const responseHeld = new Promise((resolve) => { signalHeld = resolve; });
+  const counts = { Hello: 0, Equip: 0, Ready: 0 };
+  const proxy = await hqProxy(hq, ({ op, reply }) => {
+    if (Object.hasOwn(counts, op)) counts[op] += 1;
+    const isHeld = (op === 'Hello' && counts.Hello === 2 && held.startsWith('Hello')) ||
+      (op === 'Equip' && counts.Equip === 3 && held === 'Equip') ||
+      (op === 'Ready' && counts.Ready === 2 && held === 'Ready');
+    if (!isHeld) return reply;
+    const output = held === 'Hello refusal' ? { id: reply.id, ok: false, refusal: {
+      error: 'profile_insufficient', explanation: 'protected profile unavailable', correlation_id: 'corr_profile',
+    } } : reply;
+    return new Promise((resolve) => { release = () => resolve(output); signalHeld(); });
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await soul.prompt('start the lead');
+    hq.clock.advance(60_001);
+    const renewal = assert.rejects(soul.renew(), (error) => error instanceof SoulUnavailable && error.state === 'stopped');
+    await responseHeld;
+    const before = { ...counts };
+    const admitted = soul.events().filter((event) => event.event === 'admitted').length;
+    const stopping = soul.stop();
+    assert.equal(soul.status().state, 'stopped');
+    release();
+    await renewal;
+    await stopping;
+    assert.deepEqual(counts, before, 'no later admission, Equip, or Ready request');
+    assert.equal(soul.events().filter((event) => event.event === 'admitted').length, admitted);
+    assert.equal(soul.events().some((event) => event.event === 'profile-refused'), false);
+    assert.equal(soul.status().state, 'stopped');
+    assert.ok(soul.status().members.every((member) => member.runtime_id === undefined));
+  } finally {
+    release?.();
+    await soul?.stop().catch(() => {});
+    await proxy.done(); await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
 test('a held turn is canceled without delivering updates during shutdown', { timeout: 30_000 }, async () => {
   const isolated = accountHQ();
   const hq = await startHQ(isolated.options);
