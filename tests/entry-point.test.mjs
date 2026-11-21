@@ -208,7 +208,54 @@ for (const refusal of ['cooperative grant', 'HQ refusal']) test(`a protected Sou
   }
 });
 
-test('a delayed member restart cannot re-admit after a profile refusal', { timeout: 30_000 }, async () => {
+test('a held turn is canceled without delivering updates during shutdown', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let releaseReply;
+  let releaseChunk;
+  let signalReply;
+  let signalChunk;
+  let holding = false;
+  const replyHeld = new Promise((resolve) => { signalReply = resolve; });
+  const chunkHeld = new Promise((resolve) => { signalChunk = resolve; });
+  const proxy = await hqProxy(hq, ({ op, reply, count }) => {
+    if (holding && reply.method === 'session/update') return new Promise((resolve) => {
+      releaseChunk = () => resolve(reply); signalChunk();
+    });
+    if (op === 'session/prompt' && count === 2) return new Promise((resolve) => {
+      releaseReply = () => resolve(reply); signalReply();
+    });
+    return reply;
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await soul.prompt('start the lead');
+    holding = true;
+    const chunks = [];
+    const turn = assert.rejects(soul.prompt('a turn during shutdown', (chunk) => chunks.push(chunk)),
+      (error) => error instanceof SoulUnavailable && error.state === 'stopped');
+    await Promise.all([replyHeld, chunkHeld]);
+    const stopping = soul.stop();
+    assert.equal(soul.status().state, 'stopped');
+    const chunksAtStop = [...chunks];
+    releaseChunk();
+    releaseReply();
+    await turn;
+    await stopping;
+    assert.deepEqual(chunks, chunksAtStop, 'no updates delivered after shutdown began');
+    assert.equal(soul.status().code, undefined);
+  } finally {
+    releaseChunk?.(); releaseReply?.();
+    await soul?.stop().catch(() => {});
+    await proxy.done(); await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+for (const outcome of ['profile refusal', 'shutdown']) test(`a delayed member restart cannot re-admit after ${outcome}`, { timeout: 30_000 }, async () => {
   const isolated = accountHQ();
   const hq = await startHQ(isolated.options);
   let helloCount = 0;
@@ -229,16 +276,21 @@ test('a delayed member restart cannot re-admit after a profile refusal', { timeo
   try {
     soul = await startSoul({ root, hqHome: proxy.home, requestedProfile: 'managed-protected', renewEveryMs: 0, delay });
     await soul.prompt('start the lead');
-    const turn = assert.rejects(soul.prompt('wait for a restart'), (error) => error instanceof SoulUnavailable && error.code === 'profile_insufficient');
+    const turn = assert.rejects(soul.prompt('wait for a restart'), (error) => error instanceof SoulUnavailable &&
+      (outcome === 'shutdown' ? error.state === 'stopped' : error.code === 'profile_insufficient'));
     await delayStarted;
-    hq.clock.advance(60_001);
-    await assert.rejects(soul.renew(), (error) => error.code === 'profile_insufficient');
-    assert.equal(helloCount, 2);
+    if (outcome === 'shutdown') await soul.stop();
+    else {
+      hq.clock.advance(60_001);
+      await assert.rejects(soul.renew(), (error) => error.code === 'profile_insufficient');
+    }
+    const expectedHellos = outcome === 'shutdown' ? 1 : 2;
+    assert.equal(helloCount, expectedHellos);
     releaseDelay();
     await turn;
-    assert.equal(helloCount, 2, 'delayed recovery must not issue another Hello');
-    assert.equal(soul.status().state, 'unavailable');
-    assert.ok(soul.status().members.every((member) => !member.running && member.runtime_id === undefined));
+    assert.equal(helloCount, expectedHellos, 'delayed recovery must not issue another Hello');
+    assert.equal(soul.status().state, outcome === 'shutdown' ? 'stopped' : 'unavailable');
+    assert.ok(soul.status().members.every((member) => !member.running && (outcome === 'shutdown' || member.runtime_id === undefined)));
   } finally {
     releaseDelay?.();
     await soul?.stop().catch(() => {});
