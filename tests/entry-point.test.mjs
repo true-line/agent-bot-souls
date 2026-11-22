@@ -8,7 +8,7 @@ import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, Server } from 'node:net';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
 import { connectHq } from '../lib/hq-client.mjs';
 import { handoffs, readNotes } from '../lib/notes.mjs';
@@ -16,6 +16,49 @@ import { accountHQ, DIGEST, fake, hqProxy, makeSoul, schema, setup, SOUL, startH
 
 const recoveries = (t) => t.soul.events().filter((e) => e.event === 'recovery').map((e) => [e.member_id, e.failure, e.action]);
 const finals = (t, taskId) => t.receipts('task.commit').filter((r) => r.task_id === taskId && r.status === 'completed');
+
+test('explicit HQ endpoints connect without exposing HQ home', async () => {
+  const hq = await startHQ();
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, admissionSocket: join(hq.home, 'admission.sock'),
+      brokerSocket: join(hq.home, 'broker.sock'), renewEveryMs: 0 });
+    assert.match((await soul.prompt('use the explicit broker endpoint')).text, /No waiting directives and no open tasks/);
+  } finally {
+    await soul?.stop();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('HQ endpoint selection refuses incomplete, ambiguous and invalid paths before connecting', async () => {
+  const root = makeSoul();
+  try {
+    for (const endpoints of [
+      { admissionSocket: '/a' }, { brokerSocket: '/b' },
+      { hqHome: '/hq', admissionSocket: '/a', brokerSocket: '/b' },
+      { admissionSocket: 'relative', brokerSocket: '/b' },
+      { admissionSocket: '/a', brokerSocket: '/a' },
+    ]) {
+      await assert.rejects(startSoul({ root, ...endpoints }), /provide distinct absolute admissionSocket and brokerSocket without hqHome/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('relative HQ home remains usable', async () => {
+  const hq = await startHQ();
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: relative(process.cwd(), hq.home), renewEveryMs: 0 });
+    assert.match((await soul.prompt('use the relative HQ home')).text, /No waiting directives and no open tasks/);
+  } finally {
+    await soul?.stop();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('an adapter needs a session ID before its member reports Ready or prompts', async (suite) => {
   for (const [name, reply] of [['missing', {}], ['empty', { sessionId: '' }], ['wrong type', { sessionId: 7 }]]) {
