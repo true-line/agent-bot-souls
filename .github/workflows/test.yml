@@ -22,6 +22,7 @@ jobs:
           node --version
           npm run prepare:contracts
           npm test
+          python3 -m unittest -v scripts/test_record_souls_private_handoff.py
   darwin-member-sandbox:
     runs-on: macos-15
     timeout-minutes: 10

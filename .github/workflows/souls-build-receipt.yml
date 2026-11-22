@@ -57,6 +57,7 @@ jobs:
         run: |
           npm run prepare:contracts
           npm test
+          python3 -m unittest -v scripts/test_record_souls_private_handoff.py
       - name: Build exact archive and Statement
         id: build
         run: python3 scripts/build-souls-receipt.py
@@ -113,6 +114,7 @@ jobs:
         env:
           BUILD_DIR: ${{ steps.build.outputs.directory }}
           BUNDLE: ${{ steps.receipt.outputs.bundle }}
+          BUNDLE_SHA256: ${{ steps.receipt.outputs.bundle_sha256 }}
           R2_STAGE_LOCK_ATTESTATION_SHA256: ${{ inputs.lock_attestation_sha256 }}
           R2_STAGE_LOCK_ATTESTED_AT_UTC: ${{ inputs.lock_attested_at_utc }}
           R2_STAGE_WRITE_ACCESS_KEY_ID: ${{ secrets.R2_STAGE_WRITE_ACCESS_KEY_ID }}
@@ -123,6 +125,12 @@ jobs:
           "$RUNNER_TEMP/stage2a-r2-venv/bin/python" scripts/r2-private-assets.py put \
             --role souls-build-bundle --file "$BUNDLE" --sha256 "sha256:$BUNDLE_SHA256" \
             > "$BUILD_DIR/bundle-store-receipt.json"
+      - name: Record nonsecret private object handoff
+        env:
+          BUILD_DIR: ${{ steps.build.outputs.directory }}
+          PACKAGE: ${{ steps.build.outputs.package }}
+          BUNDLE: ${{ steps.receipt.outputs.bundle }}
+        run: python3 scripts/record-souls-private-handoff.py "$BUILD_DIR" "$PACKAGE" "$BUNDLE"
       - name: Hold for post-upload lock attestation and final trust review
         run: |
           echo "::error::Post-upload owner-controlled lock attestation, exact signed receipt, private read-back, trust root and public Rekor entry have not been approved for release."
