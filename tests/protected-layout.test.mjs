@@ -153,6 +153,34 @@ test('preflight measures the full definition and Reconstructible trees independe
   assert.deepEqual(fs.readdirSync(hostProjectionRoot).sort(), PROJECTION.map(path => basename(path)));
 }));
 
+test('signed entry launch measures the fixed Souls Node invocation separately from member commands', (t) => withProjection(t, ({ root, launchInputRoot, stateRoot, plan }) => {
+  const node = join(launchInputRoot, 'bin', 'node');
+  const entry = join(launchInputRoot, 'bin', 'agent-bot-souls.mjs');
+  fs.writeFileSync(node, 'fixture Node', { mode: 0o755 });
+  fs.writeFileSync(entry, 'fixture Souls entry');
+  const admissionSocket = '/tmp/assigned-admission.sock';
+  const brokerSocket = '/tmp/assigned-relay.sock';
+  const launchInputRecords = {
+    ...plan.launchInputRecords,
+    files: [...plan.launchInputRecords.files, record('bin/node', node), record('bin/agent-bot-souls.mjs', entry)]
+      .sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path))),
+    selected_command: node,
+    argv: [node, entry, 'run', '--soul', root, '--admission-socket', admissionSocket,
+      '--broker-socket', brokerSocket, '--profile', 'managed-protected', '--protected-start-fd', '3'],
+    environment: { PATH: '/usr/bin:/bin', HOME: join(stateRoot, '..'), AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH: '1' },
+  };
+  const entryPlan = { ...plan, entryLaunch: true, admissionSocket, brokerSocket,
+    launchInputRecords, launchInputMeasurement: launchDigest(launchInputRecords) };
+  assert.equal(readProtectedSoulLayout(root, stateRoot, entryPlan).launchInputMeasurement, entryPlan.launchInputMeasurement);
+  const wrongArgv = { ...launchInputRecords, argv: [...launchInputRecords.argv] };
+  wrongArgv.argv[wrongArgv.argv.length - 1] = '4';
+  assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...entryPlan,
+    launchInputRecords: wrongArgv, launchInputMeasurement: launchDigest(wrongArgv) }), /fixed Souls entry argv differs/);
+  const wrongEnv = { ...launchInputRecords, environment: { ...launchInputRecords.environment, HOME: '/tmp/wrong' } };
+  assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...entryPlan,
+    launchInputRecords: wrongEnv, launchInputMeasurement: launchDigest(wrongEnv) }), /fixed Souls entry environment differs/);
+}));
+
 test('closure refuses file additions, missing files, and byte or permission changes', (t) => withProjection(t, ({ root, contents, stateRoot, plan }) => {
   const extra = join(contents, 'opt', 'unlisted.mjs');
   fs.writeFileSync(extra, '');
