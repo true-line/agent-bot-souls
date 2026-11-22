@@ -37,7 +37,12 @@ class CandidateVerificationTests(unittest.TestCase):
         self.source_commit = "a" * 40
         self.source_tree = "b" * 40
         self.builder_sha256 = sha(b"builder")
-        self.toolchain_sha256 = sha(b"toolchain")
+        self.toolchain = {
+            "node_version": "v26.13.1", "node_binary_sha256": "a" * 64,
+            "npm_version": "11.20.0", "npm_tree_sha256": "b" * 64,
+            "cosign_version": "v3.1.4", "cosign_binary_sha256": "c" * 64,
+        }
+        self.toolchain_sha256 = sha(candidate.canonical_json(self.toolchain))
         self.statement = {
             "_type": "https://in-toto.io/Statement/v1",
             "subject": [{"name": self.archive.name,
@@ -69,9 +74,17 @@ class CandidateVerificationTests(unittest.TestCase):
             "workflow": candidate.WORKFLOW,
             "run_id": "12345",
             "run_attempt": 1,
+            "build_inputs": {"predicate_type": candidate.PREDICATE,
+                             "subject": {"name": self.archive.name,
+                                         "sha256": sha(self.archive_bytes)[7:]},
+                             "predicate": self.statement["predicate"]},
+            "toolchain": self.toolchain,
+            "toolchain_file_sha256": sha(candidate.canonical_json(self.toolchain) + b"\n"),
             "runtime_npm_archive": self.asset("souls-package", self.archive_bytes),
             "souls_build_bundle": {},
         }
+        self.handoff["build_inputs_file_sha256"] = sha(
+            candidate.canonical_json(self.handoff["build_inputs"]) + b"\n")
         self.write_bundle()
         self.args = SimpleNamespace(
             archive=self.archive, bundle=self.bundle_path, handoff=self.handoff_path,
@@ -137,6 +150,12 @@ class CandidateVerificationTests(unittest.TestCase):
         self.write_bundle()
         self.args.trusted_root_sha256 = sha(b"wrong root")
         with self.assertRaisesRegex(ValueError, "trusted root differs"):
+            candidate.verify(self.args)
+
+    def test_changed_handoff_toolchain_is_rejected(self):
+        self.handoff["toolchain"]["npm_version"] = "11.20.1"
+        self.handoff_path.write_text(json.dumps(self.handoff))
+        with self.assertRaisesRegex(ValueError, "handoff build evidence differs"):
             candidate.verify(self.args)
 
     def test_cosign_refusal_cannot_produce_a_positive_record(self):

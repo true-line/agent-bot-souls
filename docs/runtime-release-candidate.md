@@ -23,7 +23,10 @@ passing physical gate.
 3. Preserve the job summary's `souls-private-r2-handoff-v1` JSON as
    `private-handoff.json`. It names both exact SHA-256 digests, byte lengths,
    private object locators, source commit and tree, workflow, run ID, and
-   attempt. The workflow also writes the same JSON to its build directory.
+   attempt. It also preserves the exact nonsecret build-inputs and toolchain
+   inventories with their file-byte digests, so the offline reviewer can
+   inspect the builder/toolchain selectors. The workflow writes the same JSON
+   to its build directory.
 
 The live canary proves current overwrite/delete refusal. It does not prove the
 lock duration. The owner must review the 365-day rule in the private dashboard
