@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import io
+import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -153,6 +154,12 @@ class PrivateTransportTest(unittest.TestCase):
                     proof = transport.prove_bucket_lock()
                     self.assertTrue(proof["scope_test_cleaned"])
                     self.assertTrue(proof["reader_bytes_unchanged"])
+                    refusal = {"http_status": 409, "error_code": "ObjectLockedByBucketPolicy"}
+                    self.assertEqual(proof["overwrite_refusal"], refusal)
+                    self.assertEqual(proof["delete_refusal"], refusal)
+                    self.assertEqual(proof["reader_readback"]["sha256"], proof["sha256"])
+                    self.assertEqual(proof["reader_readback"]["byte_length"],
+                                     len(bucket.objects[f"v1/canary/{nonce}"]))
                     self.assertEqual(set(bucket.objects), {f"v1/canary/{nonce}"})
                 else:
                     with self.assertRaises(transport.TransportError):
@@ -163,7 +170,9 @@ class PrivateTransportTest(unittest.TestCase):
             raise ClientError({"ResponseMetadata": {"HTTPStatusCode": status},
                                "Error": {"Code": code, "Message": code}}, "PutObject")
 
-        transport.require_lock_rejection(lambda: refusal(409, "ObjectLockedByBucketPolicy"))
+        self.assertEqual(transport.require_lock_rejection(
+            lambda: refusal(409, "ObjectLockedByBucketPolicy")),
+            {"http_status": 409, "error_code": "ObjectLockedByBucketPolicy"})
         for status, code in ((403, "AccessDenied"), (412, "PreconditionFailed"),
                              (409, "PreconditionFailed"), (200, "ObjectLockedByBucketPolicy")):
             with self.subTest(status=status, code=code), self.assertRaises(transport.TransportError):
@@ -213,6 +222,42 @@ class PrivateTransportTest(unittest.TestCase):
             self.assertFalse(any(call[1] == canary for call in calls))
             if failed_step != "delete":
                 self.assertEqual(calls[-1], ("get", disposable, None))
+
+    def test_canary_receipt_is_private_and_does_not_use_release_gate(self):
+        proof = {"key": "v1/canary/" + "1" * 32,
+                 "overwrite_refusal": {"http_status": 409,
+                                       "error_code": "ObjectLockedByBucketPolicy"},
+                 "delete_refusal": {"http_status": 409,
+                                    "error_code": "ObjectLockedByBucketPolicy"},
+                 "reader_readback": {"sha256": f"sha256:{self.digest}",
+                                     "byte_length": len(self.bytes)}}
+        stored = {}
+
+        def store(method, key, kind, source):
+            self.assertEqual((method, kind), ("PUT", "WRITE"))
+            self.assertRegex(key, r"\Av1/canary-receipt/[0-9a-f]{64}\Z")
+            stored["key"] = key
+            stored["bytes"] = source.read_bytes()
+
+        def readback(key, digest, length, destination):
+            self.assertEqual(key, stored["key"])
+            self.assertEqual(digest, hashlib.sha256(stored["bytes"]).hexdigest())
+            self.assertEqual(length, len(stored["bytes"]))
+            destination.write_bytes(stored["bytes"])
+
+        with patch.object(transport, "require_operator_lock_gate",
+                          side_effect=AssertionError("release gate used")), \
+                patch.object(transport, "prove_bucket_lock", return_value=proof), \
+                patch.object(transport, "s3_request", side_effect=store), \
+                patch.object(transport, "download_verified", side_effect=readback), \
+                patch.object(transport, "put", side_effect=AssertionError("release upload used")):
+            result = transport.canary()
+        receipt = json.loads(stored["bytes"])
+        self.assertEqual(receipt["canary"], proof)
+        self.assertEqual(result["result"], "pass")
+        self.assertFalse(result["lock_duration_verified_by_ci"])
+        self.assertEqual(result["receipt_sha256"],
+                         f"sha256:{hashlib.sha256(stored['bytes']).hexdigest()}")
 
     def test_sdk_serializes_pinned_conditional_put_without_network(self):
         class StopBeforeNetwork(Exception):
