@@ -202,7 +202,7 @@ notice-consumer or MCP integration evidence.
 
 ## Contract validation
 
-The runtime consumes `soul-contracts` v0.5.0 through the commit and
+The runtime consumes `soul-contracts` v0.6.0 through the commit and
 `sha256-manifest-v1` digest in `governance/soul-contracts.json`. The explicit
 preparation step is documented in the [README](../README.md). Schemas and
 fixtures stay in that external dependency; none is copied into this
@@ -221,8 +221,8 @@ after reading. A corrupt or unreadable stored note makes its handoff
 restrictions unavailable; it is never silently discarded to allow fail-over.
 
 `tests/contracts.test.mjs` runs every shared positive and negative fixture
-through the runtime codec for its schema/parse verdict (38 positives and 88
-negatives across 19 schemas), checks their byte pins and canonicalization
+through the runtime codec for its schema/parse verdict (69 positives and 144
+negatives across 45 schemas), checks their byte pins and canonicalization
 vectors, and exercises the two T14 version/capability refusals. This is
 component evidence for the platform's
 [Stage 0 gate](https://github.com/true-line/agent-bot-platform/blob/main/docs/10-program/roadmap.md),
