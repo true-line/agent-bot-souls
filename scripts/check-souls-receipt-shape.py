@@ -18,9 +18,11 @@ def main():
     bundle = json.loads(bundle_path.read_bytes())
     inputs = json.loads(inputs_path.read_bytes())
     require(bundle.get("mediaType") == "application/vnd.dev.sigstore.bundle.v0.3+json", "wrong bundle version")
-    content = bundle.get("content", {})
-    envelope = content.get("dsseEnvelope", {})
-    require(set(content) == {"dsseEnvelope"}, "bundle must contain one DSSE envelope")
+    require(
+        set(bundle) == {"mediaType", "verificationMaterial", "dsseEnvelope"},
+        "bundle must contain one top-level DSSE envelope",
+    )
+    envelope = bundle["dsseEnvelope"]
     require(envelope.get("payloadType") == "application/vnd.in-toto+json", "wrong DSSE payload type")
     require(len(envelope.get("signatures", [])) == 1, "receipt needs exactly one DSSE signature")
     statement = json.loads(base64.b64decode(envelope["payload"], validate=True))
