@@ -22,7 +22,7 @@ const DEFINITION = [
 const PROJECTION = ['host/adapters.json', 'host/installation.json'];
 const COMPONENTS = {
   machine: 'bin/machine', hq: 'bin/hq', souls: 'bin/souls', bridge: 'bin/bridge',
-  comms_broker: 'bin/comms-broker', adapter: 'bin/adapter', harness: 'bin/harness', test_provider: 'bin/test-provider',
+  comms_broker: 'bin/comms-broker', adapter: 'bin/claude-agent-acp', harness: 'bin/harness', test_provider: 'bin/test-provider',
 };
 const SANDBOX_POLICY = 'policy/harness-egress.sb';
 const LAUNCH_FILES = [...PROJECTION, ...Object.values(COMPONENTS), SANDBOX_POLICY].sort();
@@ -56,12 +56,12 @@ async function withProjection(t, check) {
   fs.mkdirSync(hostProjectionRoot, { recursive: true });
   fs.mkdirSync(join(launchInputRoot, 'bin'));
   fs.mkdirSync(join(launchInputRoot, 'policy'));
-  for (const path of [...Object.values(COMPONENTS), SANDBOX_POLICY]) fs.writeFileSync(join(launchInputRoot, path), `reviewed fixture ${path}\n`);
+  for (const path of [...Object.values(COMPONENTS), SANDBOX_POLICY]) fs.writeFileSync(join(launchInputRoot, path), `reviewed fixture ${path}\n`, { mode: path === COMPONENTS.adapter ? 0o755 : 0o644 });
   fs.mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
   fs.mkdirSync(join(contents, 'primitives'), { recursive: true, mode: 0o755 });
   fs.mkdirSync(join(contents, 'opt', 'empty'), { recursive: true, mode: 0o755 });
   fs.chmodSync(join(contents, 'opt', 'empty'), 0o755);
-  const projectCommand = (command) => fs.writeFileSync(join(hostProjectionRoot, 'adapters.json'), JSON.stringify({ adapter: { command, env: { TEST_ONLY: 'fixture' } } }, sortedKeys));
+  const projectCommand = (command, env = { TEST_ONLY: 'fixture' }) => fs.writeFileSync(join(hostProjectionRoot, 'adapters.json'), JSON.stringify({ adapter: { command, env } }, sortedKeys));
   const writeJson = (path, value) => fs.writeFileSync(path, `${JSON.stringify(value)}\n`);
   writeJson(join(contents, 'SoulInfo.json'), {
     soul_id: SOUL,
@@ -151,6 +151,46 @@ test('preflight measures the full definition and Reconstructible trees independe
   });
   assert.deepEqual(fs.readdirSync(stateRoot), []);
   assert.deepEqual(fs.readdirSync(hostProjectionRoot).sort(), PROJECTION.map(path => basename(path)));
+}));
+
+test('signed entry launch measures the fixed Souls Node invocation separately from member commands', (t) => withProjection(t, ({ root, launchInputRoot, stateRoot, makePlan, projectCommand }) => {
+  projectCommand([join(launchInputRoot, COMPONENTS.adapter)], {});
+  const plan = makePlan();
+  const node = join(launchInputRoot, 'bin', 'node');
+  const entry = join(launchInputRoot, 'bin', 'agent-bot-souls.mjs');
+  fs.writeFileSync(node, 'fixture Node', { mode: 0o755 });
+  fs.writeFileSync(entry, 'fixture Souls entry');
+  const admissionSocket = '/tmp/assigned-admission.sock';
+  const brokerSocket = '/tmp/assigned-relay.sock';
+  const launchInputRecords = {
+    ...plan.launchInputRecords,
+    files: [...plan.launchInputRecords.files, record('bin/node', node), record('bin/agent-bot-souls.mjs', entry)]
+      .sort((a, b) => Buffer.compare(Buffer.from(a.path), Buffer.from(b.path))),
+    selected_command: node,
+    argv: [node, entry, 'run', '--soul', root, '--admission-socket', admissionSocket,
+      '--broker-socket', brokerSocket, '--profile', 'managed-protected', '--protected-start-fd', '3'],
+    environment: { PATH: '/usr/bin:/bin', HOME: join(stateRoot, '..'), AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH: '1' },
+    effective_config: { ...plan.launchInputRecords.effective_config, adapter_id: 'adapter', adapter_child_env: {
+      schema: 'agent-bot-souls/adapter-child-env/v1', provider: 'anthropic-messages',
+      base_url: 'http://fixture.invalid', http_host: 'fixture.invalid',
+      client_key_sha256: 'sha256:da4fec28d868ca5cf8f00f43869f703f138bd4211683b8637a751b904860ddf0',
+      model: 'pilot-model', messages_query: '', disable_nonessential_traffic: true,
+    } },
+  };
+  const entryPlan = { ...plan, entryLaunch: true, admissionSocket, brokerSocket,
+    launchInputRecords, launchInputMeasurement: launchDigest(launchInputRecords) };
+  assert.equal(readProtectedSoulLayout(root, stateRoot, entryPlan).launchInputMeasurement, entryPlan.launchInputMeasurement);
+  const wrongArgv = { ...launchInputRecords, argv: [...launchInputRecords.argv] };
+  wrongArgv.argv[wrongArgv.argv.length - 1] = '4';
+  assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...entryPlan,
+    launchInputRecords: wrongArgv, launchInputMeasurement: launchDigest(wrongArgv) }), /fixed Souls entry argv differs/);
+  const wrongEnv = { ...launchInputRecords, environment: { ...launchInputRecords.environment, HOME: '/tmp/wrong' } };
+  assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...entryPlan,
+    launchInputRecords: wrongEnv, launchInputMeasurement: launchDigest(wrongEnv) }), /fixed Souls entry environment differs/);
+  const wrongChild = { ...launchInputRecords, effective_config: { ...launchInputRecords.effective_config,
+    adapter_child_env: { ...launchInputRecords.effective_config.adapter_child_env, client_key_sha256: `sha256:${'0'.repeat(64)}` } } };
+  assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...entryPlan,
+    launchInputRecords: wrongChild, launchInputMeasurement: launchDigest(wrongChild) }), /signed stock child environment is invalid/);
 }));
 
 test('closure refuses file additions, missing files, and byte or permission changes', (t) => withProjection(t, ({ root, contents, stateRoot, plan }) => {

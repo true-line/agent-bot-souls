@@ -33,6 +33,29 @@ test('explicit HQ endpoints connect without exposing HQ home', async () => {
   }
 });
 
+test('an aborted pending Hello closes admission before the Soul starts', { timeout: 5_000 }, async () => {
+  const root = makeSoul();
+  const dir = mkdtempSync(join(tmpdir(), 'souls-abort-hello-'));
+  const path = join(dir, 'admission.sock');
+  const server = new Server();
+  let received;
+  const hello = new Promise((resolve) => { received = resolve; });
+  server.on('connection', (socket) => socket.once('data', received));
+  await new Promise((resolve) => server.listen(path, resolve));
+  const abort = new AbortController();
+  try {
+    const starting = startSoul({ root, admissionSocket: path,
+      brokerSocket: join(dir, 'broker.sock'), signal: abort.signal, renewEveryMs: 0 });
+    await hello;
+    abort.abort(new Error('signed Live lease expired'));
+    await assert.rejects(starting, /signed Live lease expired/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(root, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('HQ endpoint selection refuses incomplete, ambiguous and invalid paths before connecting', async () => {
   const root = makeSoul();
   try {
