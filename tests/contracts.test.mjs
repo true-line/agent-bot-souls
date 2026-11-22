@@ -36,8 +36,8 @@ test('runtime schemas/strict parser reproduce every shared fixture verdict', () 
   // A new contract record cannot escape the consumer coverage silently.
   const schemas = (dir, prefix = '') => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => entry.isDirectory() ? schemas(join(dir, entry.name), `${prefix}${entry.name}/`) : entry.name.endsWith('.schema.json') ? [`${prefix}${entry.name}`] : []);
   assert.deepEqual([...seen].sort(), schemas(join(root, 'schemas')).sort());
-  assert.equal(positives.length, 69);
-  assert.equal(negatives.length, 144);
+  assert.equal(positives.length, 95);
+  assert.equal(negatives.length, 197);
 });
 
 test('runtime canonicalization matches every positive and all JCS vectors', () => {
