@@ -55,9 +55,11 @@ The later dedicated-HQ-account move must replace that transitional ownership
 with an HQ-owned proxy or a separately provisioned entry-point directory. This
 integration does not claim that service-account boundary is complete.
 
-`--profile managed-protected` requests protected operation and fails before
-an adapter starts if HQ grants a weaker profile or account launch cannot be
-used. Omitting `--profile` selects the default. Supplying it without a value stops startup before HQ admission.
+`--profile managed-protected` refuses before HQ admission while
+Machine-authenticated protected launch inputs are unavailable. The entry
+point also refuses a protected Hello grant before `Equip`. Omitting
+`--profile` selects the default. Supplying it without a value stops startup
+before HQ admission.
 The default `managed-cooperative` request preserves existing hosts: it
 uses local spawn only when HQ explicitly reports `host.launch_unavailable`.
 Before request-time fallback it proves the admitted runtime may use HQ's
@@ -78,7 +80,7 @@ prevents further automatic prompt retries.
 
 ## Files it reads
 
-Everything is under `<package>/Contents/`
+The cooperative layout is under `<package>/Contents/`
 ([soul-package layout](https://github.com/true-line/soul-package/blob/main/spec/LAYOUT.md)).
 
 | File | Fields read |
@@ -116,6 +118,37 @@ harness account's verified endpoint directory; the entry point bounds
 unauthenticated connections, requires the member token within five seconds,
 and removes the socket on stop. It also writes `comms/notes/<note_id>.json`
 and, for local fallback, each member's `home/<member>/`.
+
+## Protected preflight placement
+
+The Machine installation plan records the exact canonical absolute paths of
+the frozen package, the launch-input projection, and the per-installation
+state directory. The three trees are disjoint. The package and launch-input
+projection have root ownership throughout. The state leaf has mode `0700`,
+uses the installation ID as its name, and belongs to the plan's runner UID.
+Every ancestor of each tree must be root-owned, free of symlinks and allow
+ACLs, and writable only by root.
+
+On macOS, the physical plan must name an approved Machine-provisioned base,
+for example under `/private/var/db/managed-machine` after verification on the
+designated host. Use the canonical `/private/var` spelling. A projection or
+state directory below a runner-owned or daily-user home cannot satisfy the
+ancestry check.
+
+The preflight measures `Contents` and the frozen package records relative to
+the package root. It measures `host/adapters.json`, `host/installation.json`
+and the other reviewed launch files relative to the separate launch-input
+projection root. The launch measurement covers the full object, including the
+projected host values, selected command, full ordered argv, reviewed environment,
+effective configuration with its profile, system image constraints, sandbox policy and
+component digests for both the bridge and the HQ-hosted comms broker. Each
+selected system image binds its path, signing requirement and CDHash to the
+declared macOS version, build and kernel. The generated host files bind their
+exact raw bytes and parsed values. Named sandbox and component digests match
+files in the reviewed projection. Machine owns independent verification of
+the actual environment, selected runtime imports and the signed start required
+for protected admission.
+[Platform Stage 2a measurement rule](https://github.com/true-line/agent-bot-platform/blob/main/docs/03-architecture/interfaces/stage2a-measurement.md)
 
 ## What a member can ask
 
