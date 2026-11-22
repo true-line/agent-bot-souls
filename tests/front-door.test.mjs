@@ -235,6 +235,18 @@ test('run and chat reject an option missing its value before HQ admission', asyn
   } finally { await t.done(); }
 });
 
+test('the executable rejects ambiguous or incomplete explicit HQ endpoints', async () => {
+  const execute = promisify(execFile);
+  for (const args of [
+    ['--admission-socket', '/a'],
+    ['--hq-home', '/hq', '--admission-socket', '/a', '--broker-socket', '/b'],
+    ['--admission-socket', '/a', '--broker-socket', '/b', '--broker-socket', '/c'],
+  ]) {
+    await assert.rejects(execute(process.execPath, [BIN, 'run', '--soul', '/unused', ...args]),
+      (error) => error.code === 1 && /provide distinct absolute|may only be supplied once/.test(error.stderr));
+  }
+});
+
 test('the executable reports its version and refuses what it does not know', () => {
   const version = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
   assert.equal(execFileSync(process.execPath, [BIN, '--version'], { encoding: 'utf8' }).trim(), version);
