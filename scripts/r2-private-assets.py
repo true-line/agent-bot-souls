@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""Fail-closed Stage 2a R2 transport proposal; never prints credentials or bytes.
+"""Fail-closed Stage 2a R2 transport; never prints credentials or asset bytes.
 
-Release asset upload remains unreachable behind the release workflow's first
-hard hold. A separate protected canary workflow may call only the canary
-subcommand. The protected environment supplies separate bucket-scoped S3 writer
-and reader credentials. The canary tests current enforcement independently;
-an owner-controlled dashboard read-back supplies the rule duration outside CI.
-Release asset upload still requires a fresh external attestation digest and time.
+The protected build-candidate workflow supplies separate bucket-scoped S3
+writer and reader credentials. Each upload proves current lock enforcement and
+reads back exact bytes through the reader. The owner-controlled dashboard
+attestation supplies the rule duration outside CI, before upload and again
+afterward for final release review. A successful upload is not certification.
 """
 
 import argparse

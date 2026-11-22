@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Emit only nonsecret metadata for independent read-back of private R2 assets.
 
-The workflow's final release hold remains separate. This record is an index,
-not signature verification, owner lock attestation, or release approval.
+Final release review remains separate. This record is an index, not owner-pinned
+signature verification, owner lock attestation, or release approval.
 """
 
 import hashlib
@@ -138,8 +138,11 @@ def collect(build_dir, package_path, bundle_path, environ, git_identity=None):
     }
 
 
-def emit(record, summary_path):
+def emit(record, summary_path, output_path=None):
     encoded = json.dumps(record, sort_keys=True, separators=(",", ":"))
+    if output_path is not None:
+        with open(output_path, "x", encoding="utf-8") as output:
+            output.write(encoded + "\n")
     with open(summary_path, "a", encoding="utf-8") as summary:
         summary.write("## Souls private R2 handoff\n\n```json\n")
         summary.write(json.dumps(record, sort_keys=True, indent=2) + "\n")
@@ -152,8 +155,9 @@ def main():
         raise ValueError("expected build directory, runtime archive and signed bundle")
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
     require(summary_path, "GitHub job summary path is missing")
-    record = collect(Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), os.environ)
-    emit(record, summary_path)
+    build_dir = Path(sys.argv[1])
+    record = collect(build_dir, Path(sys.argv[2]), Path(sys.argv[3]), os.environ)
+    emit(record, summary_path, build_dir / "private-handoff.json")
 
 
 if __name__ == "__main__":

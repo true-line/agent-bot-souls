@@ -101,7 +101,8 @@ class HandoffTest(unittest.TestCase):
         output = io.StringIO()
         summary = self.root / "summary.md"
         with redirect_stdout(output):
-            handoff.emit(record, summary)
+            handoff.emit(record, summary, self.root / "private-handoff.json")
+        self.assertEqual(json.loads((self.root / "private-handoff.json").read_text()), record)
         self.assertIn("qualification://stage2a/souls-build-bundle/", output.getvalue())
         self.assertIn("souls-private-r2-handoff-v1", summary.read_text())
         self.assertNotIn("DO_NOT_LOG_ME", output.getvalue() + summary.read_text())
