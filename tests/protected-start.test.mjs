@@ -119,17 +119,31 @@ test('signed handoff refuses altered records, wrong signer, stale start, wrong i
 });
 
 test('run reads a bounded strict fd 3 pipe before touching ACP stdout', async () => {
-  const child = spawn('/bin/bash', ['-c',
-    'printf %s \'{"schema":"a","schema":"b"}\' | "$@" 3<&0 </dev/null',
-    'bash', process.execPath, BIN, 'run', '--soul', ROOT,
+  const pipeExec = [
+    'import os, sys',
+    'read_fd, write_fd = os.pipe()',
+    'pid = os.fork()',
+    'if pid == 0:',
+    '    os.close(write_fd)',
+    '    os.dup2(read_fd, 3)',
+    '    os.set_inheritable(3, True)',
+    '    os.execv(sys.argv[1], sys.argv[1:])',
+    'os.close(read_fd)',
+    'os.write(write_fd, b\'{"schema":"a","schema":"b"}\')',
+    'os.close(write_fd)',
+    '_, status = os.waitpid(pid, 0)',
+    'os._exit(os.waitstatus_to_exitcode(status))',
+  ].join('\n');
+  const child = spawn('/usr/bin/python3', ['-c', pipeExec, process.execPath, BIN, 'run', '--soul', ROOT,
     '--admission-socket', '/tmp/admission.sock', '--broker-socket', '/tmp/relay.sock',
     '--profile', 'managed-protected', '--protected-start-fd', '3'],
   { stdio: ['ignore', 'pipe', 'pipe'] });
+  const exited = once(child, 'exit');
   let stdout = '';
   let stderr = '';
   child.stdout.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
   child.stderr.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
-  const [code] = await once(child, 'exit');
+  const [code] = await exited;
   assert.equal(code, 1);
   assert.equal(stdout, '');
   assert.match(stderr, /fd 3 is invalid UTF-8 JSON.*duplicate key/);
