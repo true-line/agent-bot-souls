@@ -39,6 +39,16 @@ test('R accepts only fresh A-signed, monotonic five-second leases for the same R
   };
   const first = verifyProtectedLive(signed(payload), start, activation, challenge, null, pin, now);
   assert.equal(first.sequence, 1);
+  // HQ and the child wrapper consume the same Machine reservation counter.
+  // R's first challenge can therefore receive a later signed sequence.
+  const lateFirst = verifyProtectedLive(signed({ ...payload, sequence: 3 }), start, activation, challenge, null, pin, now);
+  assert.equal(lateFirst.sequence, 3);
+  const lateNext = verifyProtectedLive(signed({ ...payload, sequence: 5 }), start, activation, challenge, lateFirst, pin, now);
+  assert.equal(lateNext.sequence, 5);
+  assert.throws(() => verifyProtectedLive(signed({ ...payload, sequence: 3 }),
+    start, activation, challenge, lateNext, pin, now), /sequence is stale/);
+  assert.throws(() => verifyProtectedLive(signed({ ...payload, sequence: 0 }),
+    start, activation, challenge, null, pin, now), /sequence is stale/);
   assert.throws(() => verifyProtectedLive(signed(payload), start, activation, challenge, first, pin, now), /sequence is stale/);
   assert.throws(() => verifyProtectedLive(signed(payload), start, activation, randomBytes(32), null, pin, now), /challenge/);
   assert.throws(() => verifyProtectedLive(signed({ ...payload, expires_at_ms: now - 1 }), start, activation, challenge, null, pin, now), /expired/);
