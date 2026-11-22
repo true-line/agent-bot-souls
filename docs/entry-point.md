@@ -271,7 +271,7 @@ notice-consumer or MCP integration evidence.
 
 ## Contract validation
 
-The runtime consumes `soul-contracts` v0.6.0 through the commit and
+The runtime consumes `soul-contracts` v0.7.0 through the commit and
 `sha256-manifest-v1` digest in `governance/soul-contracts.json`. The explicit
 preparation step is documented in the [README](../README.md). Schemas and
 fixtures stay in that external dependency; none is copied into this
