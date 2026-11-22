@@ -84,11 +84,33 @@ implement that operation, so this route fails closed. B-only token/proof
 handoff over the fixed inherited pipe, a race-resistant directory handoff,
 and physical cross-UID verification remain production gates.
 
-`--profile managed-protected` refuses before HQ admission while
-Machine-authenticated protected launch inputs are unavailable. The entry
-point also refuses a protected Hello grant before `Equip`. Omitting
-`--profile` selects the default. Supplying it without a value stops startup
-before HQ admission.
+`--profile managed-protected` requires the fixed Machine launcher, both
+assigned HQ sockets and `--protected-start-fd 3` on `run`. The inherited pipe
+carries a signed one-use Machine reservation, the complete launch-input
+records and the dedicated runner state path. The entry point checks the
+installed Machine public pin, signature, start identity, expiry and measured
+frozen layout before Hello. R then reads one bounded private HQ preface before
+ACP, verifies A's signed B finalization against that reservation and the live
+B relay socket, and obtains a fresh challenge-bound A-signed Live lease over
+the Machine-assigned R-only admission socket. Its watchdog renews the lease
+while protected Hello and Equip complete. Only then does R write a private
+readiness ack containing the latest signed lease digest and sequence. HQ then
+sends exactly one bounded second private frame with A's signed Hello
+finalization and child-start receipts. R checks both signatures against its
+installed Machine pin and binds their reservation, R/B and child identities,
+executable, sandbox, relay, environment and five-second expiry to its signed
+start. R returns the child receipt digest in a second private ack. Any
+attempted owner ACP bytes on this control pipe stop R. Machine's separate
+one-use stock child grant and signed child-start receipt are required before
+HQ may expose ACP. R never starts the child inside its own sandbox; a native
+macOS check rejected nested `sandbox-exec` with
+`sandbox_apply: Operation not permitted`.
+
+HQ must independently authenticate and finalize that same live start before
+its protected admission is usable. A direct
+protected request or a cooperative Hello with a protected grant refuses.
+Omitting `--profile` selects the cooperative default. Supplying it without a
+value stops startup before HQ admission.
 The default `managed-cooperative` request preserves existing hosts: it uses
 local spawn only when HQ explicitly reports `host.launch_unavailable` and the
 runner has not been marked as HQ-started.

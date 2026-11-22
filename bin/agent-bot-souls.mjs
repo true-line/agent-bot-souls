@@ -2,7 +2,7 @@
 // agent-bot-souls: the Soul runtime's executable (platform PDR-0037),
 // reached through the shim as `agent-bot souls …`.
 //
-//   agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile PROFILE]
+//   agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile PROFILE] [--protected-start-fd 3]
 //   agent-bot-souls chat --soul DIR [--hq-home DIR] [--profile PROFILE]   a terminal chat with the Soul
 //   agent-bot-souls member <op> [JSON]                a member's requests, from inside a member
 //   agent-bot-souls fake-adapter                      the fake ACP adapter (testing and demos)
@@ -16,9 +16,13 @@ import { startSoul } from '../lib/entry-point.mjs';
 import { runFakeAdapter } from '../lib/fake-adapter.mjs';
 import { chat, serveAcp } from '../lib/front-door.mjs';
 import { connectMember } from '../lib/member.mjs';
+import { checkProtectedStart, readProtectedStart } from '../lib/protected-start.mjs';
+import { checkProtectedActivation, readProtectedActivation } from '../lib/protected-activation.mjs';
+import { beginProtectedControl } from '../lib/protected-control.mjs';
+import { readProtectedSoulLayout } from '../lib/soul.mjs';
 
 const USAGE = `usage:
-  agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile managed-cooperative|managed-protected]
+  agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile managed-cooperative|managed-protected] [--protected-start-fd 3]
   agent-bot-souls chat --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile managed-cooperative|managed-protected]
   agent-bot-souls member <runtime|directives|handoffs|get|commit|route|note> [JSON]
   agent-bot-souls fake-adapter
@@ -36,7 +40,7 @@ const MEMBER_OPS = {
 
 function options(argv) {
   const out = {};
-  const optionsWithValues = ['--soul', '--hq-home', '--admission-socket', '--broker-socket', '--profile'];
+  const optionsWithValues = ['--soul', '--hq-home', '--admission-socket', '--broker-socket', '--profile', '--protected-start-fd'];
   for (let i = 0; i < argv.length; i += 2) {
     const option = argv[i];
     if (!optionsWithValues.includes(option)) throw new Error(`unknown argument ${option}`);
@@ -46,8 +50,9 @@ function options(argv) {
     out[option.slice(2)] = value;
   }
   if (!out.soul) throw new Error('--soul DIR is required');
+  if (out['protected-start-fd'] !== undefined && out['protected-start-fd'] !== '3') throw new Error('--protected-start-fd requires inherited fd 3');
   const explicit = out['admission-socket'] !== undefined || out['broker-socket'] !== undefined;
-  return { root: out.soul, ...(explicit
+  return { root: out.soul, protectedStartFd: out['protected-start-fd'] === undefined ? undefined : 3, ...(explicit
     ? { admissionSocket: out['admission-socket'], brokerSocket: out['broker-socket'], ...(out['hq-home'] !== undefined ? { hqHome: out['hq-home'] } : {}) }
     : { hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq') }), requestedProfile: out.profile ?? 'managed-cooperative' };
 }
@@ -68,7 +73,42 @@ async function main([cmd, ...rest]) {
     return 0;
   }
   if (cmd === 'run' || cmd === 'chat') {
-    const soul = await startSoul({ ...options(rest), log: (e) => { if (cmd === 'run' || e.event !== 'member-stderr') process.stderr.write(`${JSON.stringify(e)}\n`); } });
+    const { protectedStartFd, ...entryOptions } = options(rest);
+    if (protectedStartFd !== undefined) {
+      if (cmd !== 'run' || entryOptions.requestedProfile !== 'managed-protected'
+        || entryOptions.admissionSocket === undefined || entryOptions.brokerSocket === undefined) {
+        throw new Error('protected fd 3 is only for run with managed-protected and both assigned HQ sockets');
+      }
+      entryOptions.protectedStart = readProtectedStart(protectedStartFd, entryOptions.root);
+      const start = checkProtectedStart(entryOptions.protectedStart, entryOptions.root);
+      readProtectedSoulLayout(entryOptions.root, start.stateRoot, start, 'managed-protected');
+      const activation = checkProtectedActivation(await readProtectedActivation(process.stdin), start);
+      const abort = new AbortController();
+      const stopProtected = () => abort.abort();
+      process.on('SIGINT', stopProtected);
+      process.on('SIGTERM', stopProtected);
+      let control;
+      try {
+        control = await beginProtectedControl({ start, activation,
+          input: process.stdin, output: process.stdout, signal: abort.signal });
+        const soul = await startSoul({ ...entryOptions, log: (e) => process.stderr.write(`${JSON.stringify(e)}\n`) });
+        control.attachSoul(soul);
+        await control.acknowledge();
+        const childReceipt = await control.waitForChild();
+        await control.acknowledgeChild(childReceipt);
+        const result = await control.done;
+        if (result.stopError) throw result.stopError;
+        if (result.reason !== 'protected control stopped') throw new Error(`protected control: ${result.reason}`);
+      } catch (error) {
+        await control?.stop();
+        throw error;
+      } finally {
+        process.off('SIGINT', stopProtected);
+        process.off('SIGTERM', stopProtected);
+      }
+      return 0;
+    }
+    const soul = await startSoul({ ...entryOptions, log: (e) => { if (cmd === 'run' || e.event !== 'member-stderr') process.stderr.write(`${JSON.stringify(e)}\n`); } });
     let stop;
     const signal = new Promise((resolve) => { stop = () => resolve(); });
     process.on('SIGINT', stop);
