@@ -60,6 +60,10 @@ def strict_json(data):
                       parse_constant=no_float)
 
 
+def canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+
 def bounded_json(path):
     descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     with os.fdopen(descriptor, "rb") as stream:
@@ -102,6 +106,18 @@ def verify(args):
             handoff.get("source_commit") == args.source_commit and
             handoff.get("source_tree") == args.source_tree and
             handoff.get("workflow") == WORKFLOW, "handoff source differs")
+    inputs = handoff.get("build_inputs")
+    toolchain = handoff.get("toolchain")
+    require(isinstance(inputs, dict) and isinstance(toolchain, dict) and
+            isinstance(handoff.get("build_inputs_file_sha256"), str) and
+            isinstance(handoff.get("toolchain_file_sha256"), str) and
+            handoff["build_inputs_file_sha256"] ==
+            "sha256:" + hashlib.sha256(canonical_json(inputs) + b"\n").hexdigest() and
+            handoff["toolchain_file_sha256"] ==
+            "sha256:" + hashlib.sha256(canonical_json(toolchain) + b"\n").hexdigest() and
+            "sha256:" + hashlib.sha256(canonical_json(toolchain)).hexdigest() ==
+            args.toolchain_sha256,
+            "handoff build evidence differs")
     run_id, attempt = handoff.get("run_id"), handoff.get("run_attempt")
     require(isinstance(run_id, str) and re.fullmatch(r"[1-9][0-9]{0,19}", run_id) and
             type(attempt) is int and attempt > 0, "invalid handoff run identity")
@@ -144,6 +160,11 @@ def verify(args):
         "toolchain_sha256": args.toolchain_sha256, "workflow": WORKFLOW,
         "run_id": run_id, "run_attempt": attempt,
     }, "signed predicate differs from approved selectors")
+    require(inputs == {"predicate_type": PREDICATE,
+                       "subject": {"name": args.archive.name,
+                                   "sha256": archive_sha[7:]},
+                       "predicate": predicate},
+            "handoff build inputs differ from signed Statement")
     material = bundle["verificationMaterial"]
     require(isinstance(material, dict) and "certificate" in material and
             isinstance(material.get("tlogEntries"), list) and

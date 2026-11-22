@@ -63,14 +63,23 @@ class HandoffTest(unittest.TestCase):
             "workflow": handoff.WORKFLOW,
             "run_id": self.env["GITHUB_RUN_ID"],
             "run_attempt": 2,
+            "builder_sha256": "sha256:" + "c" * 64,
         }
-        self.write("build-inputs.json", {"predicate": predicate,
+        self.toolchain = {
+            "node_version": "v26.13.1", "node_binary_sha256": "a" * 64,
+            "npm_version": "11.20.0", "npm_tree_sha256": "b" * 64,
+            "cosign_version": "v3.1.4", "cosign_binary_sha256": "c" * 64,
+        }
+        predicate["toolchain_sha256"] = "sha256:" + sha(handoff.canonical_json(self.toolchain))
+        self.write("build-inputs.json", {"predicate_type": handoff.PREDICATE_TYPE,
+            "predicate": predicate,
             "subject": {"name": self.package.name, "sha256": sha(self.package_bytes)}})
+        self.write("toolchain.json", self.toolchain)
         self.write("package-store-receipt.json", self.receipt("souls-package", self.package_bytes))
         self.write("bundle-store-receipt.json", self.receipt("souls-build-bundle", self.bundle_bytes))
 
     def write(self, name, value):
-        (self.root / name).write_text(json.dumps(value), encoding="utf-8")
+        (self.root / name).write_bytes(handoff.canonical_json(value) + b"\n")
 
     def receipt(self, role, data):
         digest = sha(data)
@@ -98,6 +107,9 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(record["run_attempt"], 2)
         self.assertEqual(record["runtime_npm_archive"]["byte_length"], len(self.package_bytes))
         self.assertEqual(record["souls_build_bundle"]["sha256"], f"sha256:{sha(self.bundle_bytes)}")
+        self.assertEqual(record["toolchain"], self.toolchain)
+        self.assertEqual(record["toolchain_file_sha256"],
+                         "sha256:" + sha((self.root / "toolchain.json").read_bytes()))
         output = io.StringIO()
         summary = self.root / "summary.md"
         with redirect_stdout(output):
@@ -150,6 +162,13 @@ class HandoffTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "checked-out Git objects"):
             handoff.collect(self.root, self.package, self.bundle, self.env,
                             git_identity=("a" * 40, "c" * 40))
+
+    def test_changed_toolchain_inventory_is_rejected(self):
+        changed = dict(self.toolchain)
+        changed["npm_version"] = "11.20.1"
+        self.write("toolchain.json", changed)
+        with self.assertRaisesRegex(ValueError, "build toolchain differs"):
+            self.collect()
 
     def test_symlinked_asset_is_rejected(self):
         target = self.root / "target"

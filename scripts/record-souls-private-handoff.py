@@ -17,6 +17,7 @@ import sys
 
 REPOSITORY = "true-line/agent-bot-souls"
 WORKFLOW = ".github/workflows/souls-build-receipt.yml"
+PREDICATE_TYPE = "https://true-line.ai/soul-contracts/adapter/v2/souls-build"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 RUN_ID = re.compile(r"[1-9][0-9]{0,19}\Z")
@@ -32,6 +33,21 @@ def read_json(path):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         raise ValueError("private handoff input is missing or invalid JSON") from None
+
+
+def canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
+
+
+def checked_build_json(path):
+    try:
+        raw = path.read_bytes()
+        require(0 < len(raw) <= 1024 * 1024, "build evidence exceeds bound")
+        value = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError):
+        raise ValueError("build evidence is missing or invalid JSON") from None
+    require(raw == canonical_json(value) + b"\n", "build evidence bytes are not canonical")
+    return value, "sha256:" + hashlib.sha256(raw).hexdigest()
 
 
 def file_identity(path):
@@ -99,10 +115,27 @@ def collect(build_dir, package_path, bundle_path, environ, git_identity=None):
     require(RUN_ID.fullmatch(run_id) is not None and RUN_ID.fullmatch(run_attempt) is not None,
             "invalid Actions run identity")
 
-    inputs = read_json(build_dir / "build-inputs.json")
-    require(isinstance(inputs, dict) and isinstance(inputs.get("predicate"), dict),
+    inputs, inputs_file_sha256 = checked_build_json(build_dir / "build-inputs.json")
+    toolchain, toolchain_file_sha256 = checked_build_json(build_dir / "toolchain.json")
+    require(isinstance(inputs, dict) and set(inputs) ==
+            {"predicate_type", "subject", "predicate"} and
+            inputs.get("predicate_type") == PREDICATE_TYPE and
+            isinstance(inputs.get("predicate"), dict),
             "build inputs lack predicate")
     predicate = inputs["predicate"]
+    require(isinstance(toolchain, dict) and set(toolchain) == {
+        "node_version", "node_binary_sha256", "npm_version", "npm_tree_sha256",
+        "cosign_version", "cosign_binary_sha256"}, "invalid toolchain inventory")
+    require(all(isinstance(toolchain[key], str) for key in toolchain) and
+            all(SHA256.fullmatch(toolchain[key]) for key in (
+                "node_binary_sha256", "npm_tree_sha256", "cosign_binary_sha256")),
+            "invalid toolchain values")
+    require(predicate.get("toolchain_sha256") ==
+            "sha256:" + hashlib.sha256(canonical_json(toolchain)).hexdigest(),
+            "build toolchain differs from predicate")
+    require(isinstance(predicate.get("builder_sha256"), str) and
+            re.fullmatch(r"sha256:[0-9a-f]{64}", predicate["builder_sha256"]),
+            "invalid builder digest")
     source_tree = predicate.get("source_tree", "")
     require(COMMIT.fullmatch(source_tree) is not None, "invalid source tree")
     require((git_identity or git_source_identity()) == (source_commit, source_tree),
@@ -132,6 +165,10 @@ def collect(build_dir, package_path, bundle_path, environ, git_identity=None):
         "workflow": WORKFLOW,
         "run_id": run_id,
         "run_attempt": int(run_attempt),
+        "build_inputs": inputs,
+        "build_inputs_file_sha256": inputs_file_sha256,
+        "toolchain": toolchain,
+        "toolchain_file_sha256": toolchain_file_sha256,
         "runtime_npm_archive": package,
         "souls_build_bundle": bundle,
         "scope": "private object locator only; independent signature, Rekor, lock and release review required",
