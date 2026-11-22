@@ -48,6 +48,8 @@ test('R binds signed Hello and child start to this R/B reservation, host, execut
     files: [{ path: 'policy/soul-child-egress.sb', sha256: sandboxBareSha }] } };
   const activation = { finalizationSha256: sha('finalization'), bindReceiptSha256: sha('bind'),
     runnerWrapperPid: 1001, bridgePid: 1002 };
+  const admission = { helloPayloadSha256: sha('hello'), decisionId: 'decision',
+    installationEpoch: 1, admittedRuntimes: [] };
   const runner = { pid: 1001, uid: 501, gid: 20, start_seconds: 1_700_000_000, start_micros: 1 };
   const bridge = { pid: 1002, uid: 502, gid: 20, start_seconds: 1_700_000_000, start_micros: 2 };
   const childLauncher = { pid: 1003, uid: 501, gid: 20, start_seconds: 1_700_000_000, start_micros: 3 };
@@ -83,9 +85,17 @@ test('R binds signed Hello and child start to this R/B reservation, host, execut
   };
   const live = { runner, bridge };
   const good = frameFor(payload);
-  assert.equal(verifyProtectedChildStart(good, start, activation, live, pin, now).sha256, good.child_start_sha256);
-  assert.throws(() => verifyProtectedChildStart({ ...good, child_start_sha256: sha('altered') }, start, activation, live, pin, now), /digest differs/);
-  assert.throws(() => verifyProtectedChildStart(frameFor({ ...payload, child: { ...child, uid: 999 } }), start, activation, live, pin, now), /signed child start differs/);
-  assert.throws(() => verifyProtectedChildStart(frameFor({ ...payload, expires_at_ms: now - 1 }), start, activation, live, pin, now), /signed child start differs/);
-  assert.throws(() => verifyProtectedChildStart(good, { ...start, brokerSocket: '/wrong-host.sock' }, activation, live, pin, now), /signed child start differs/);
+  assert.equal(verifyProtectedChildStart(good, start, activation, live, pin, now, admission).sha256, good.child_start_sha256);
+  assert.throws(() => verifyProtectedChildStart({ ...good, child_start_sha256: sha('altered') }, start, activation, live, pin, now, admission), /digest differs/);
+  assert.throws(() => verifyProtectedChildStart(frameFor({ ...payload, child: { ...child, uid: 999 } }), start, activation, live, pin, now, admission), /signed child start differs/);
+  assert.throws(() => verifyProtectedChildStart(frameFor({ ...payload, expires_at_ms: now - 1 }), start, activation, live, pin, now, admission), /signed child start differs/);
+  assert.throws(() => verifyProtectedChildStart(good, { ...start, brokerSocket: '/wrong-host.sock' }, activation, live, pin, now, admission), /signed child start differs/);
+  assert.throws(() => verifyProtectedChildStart(good, start, activation, live, pin, now,
+    { ...admission, helloPayloadSha256: sha('other Hello') }), /Hello finalization differs/);
+  assert.throws(() => verifyProtectedChildStart(good, start, activation, live, pin, now,
+    { ...admission, decisionId: 'other-decision' }), /Hello finalization differs/);
+  assert.throws(() => verifyProtectedChildStart(good, start, activation, live, pin, now,
+    { ...admission, installationEpoch: 2 }), /Hello finalization differs/);
+  assert.throws(() => verifyProtectedChildStart(good, start, activation, live, pin, now,
+    { ...admission, admittedRuntimes: [{ member_id: 'm_lead', runtime_id: 'rt_other', profile_in_force: 'managed-protected' }] }), /Hello finalization differs/);
 });

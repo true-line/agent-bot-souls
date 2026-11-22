@@ -91,8 +91,10 @@ async function main([cmd, ...rest]) {
       try {
         control = await beginProtectedControl({ start, activation,
           input: process.stdin, output: process.stdout, signal: abort.signal });
-        const soul = await startSoul({ ...entryOptions, log: (e) => process.stderr.write(`${JSON.stringify(e)}\n`) });
-        control.attachSoul(soul);
+        void control.done.then(() => abort.abort());
+        const soul = await startSoul({ ...entryOptions, signal: abort.signal,
+          log: (e) => process.stderr.write(`${JSON.stringify(e)}\n`) });
+        await control.attachSoul(soul);
         await control.acknowledge();
         const childReceipt = await control.waitForChild();
         await control.acknowledgeChild(childReceipt);

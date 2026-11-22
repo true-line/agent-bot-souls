@@ -65,6 +65,14 @@ test('R accepts only fresh A-signed, monotonic five-second leases for the same R
   const withChild = { ...payload, sequence: 5,
     hello_finalization_sha256: childReceipt.helloFinalizationSha256,
     child_launcher: childLauncher, child, child_receipt_sha256: childReceipt.sha256 };
+  const provisional = verifyProtectedLive(signed(withChild), start, activation, challenge, skipped, pin, now);
+  assert.equal(provisional.childClaim.sha256, childReceipt.sha256);
+  assert.equal(verifyProtectedLive(signed({ ...withChild, sequence: 6 }),
+    start, activation, challenge, provisional, pin, now).sequence, 6);
+  assert.throws(() => verifyProtectedLive(signed({ ...payload, sequence: 6 }),
+    start, activation, challenge, provisional, pin, now), /returned to pre-child phase/);
+  assert.throws(() => verifyProtectedLive(signed({ ...withChild, sequence: 6, child_receipt_sha256: sha('other') }),
+    start, activation, challenge, provisional, pin, now), /identity changed/);
   assert.equal(verifyProtectedLive(signed(withChild), start, activation, challenge, skipped, pin, now, childReceipt).sequence, 5);
   assert.throws(() => verifyProtectedLive(signed({ ...withChild, child: { ...child, pid: 9999 } }),
     start, activation, challenge, skipped, pin, now, childReceipt), /child identity differs/);
