@@ -49,19 +49,49 @@ The entry point supplies only the member token; HQ derives the member ID,
 role and both socket paths from the admitted runtime and verified account.
 Adapter-defined environment variables are refused instead of silently dropped.
 
-For the current pilot, HQ and the Soul entry point share the host UID, so the
-entry point can bind the returned path inside HQ's harness endpoint directory.
-The later dedicated-HQ-account move must replace that transitional ownership
-with an HQ-owned proxy or a separately provisioned entry-point directory. This
-integration does not claim that service-account boundary is complete.
+The current pilot shares a host UID for HQ and the Soul entry point. A
+separate per-installation Soul-runner UID needs a per-start member directory
+provisioned for that runner, with only the assigned bridge principal's group
+allowed to connect. A separate R/B launch must carry the Machine-assigned
+`member_endpoint`; if it is missing, the entry point stops the reservation
+before binding a member socket or attaching ACP. The reply describes that
+directory without giving the runner the bridge's broker path. The entry
+point checks the directory owner, group, mode, canonical path and inode
+before and after binding the socket. It does
+not create the directory or treat the reply as a Machine start receipt.
+Machine must authenticate and provision the one-use account/path assignment.
+For this route the entry point checks each accepted member connection's
+kernel peer UID against the assigned runner and bridge UIDs before it
+reads the member token. The runner token can use ordinary member operations
+but cannot request the member socket `runtime` response; that requires the
+bridge UID and an HQ-minted bridge member token. In the separate-runner route
+the response omits the broker path and `channel_binding`. Current HQ Equip
+still places its older `channel_binding` in runner memory; HQ must make that
+binding non-authoritative at B's broker endpoint and mint a separate B-only
+broker proof. Denying a later socket operation does not provide that custody.
+
+The HQ-started runner receives the exact admission and broker endpoints through
+`--admission-socket` and `--broker-socket`. Both must be absolute and distinct;
+this route does not derive a broker path from HQ's home directory. An
+HQ-started runner also requires `AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH=1` to
+disable local adapter fallback; an isolated member endpoint always refuses it.
+After member socket bind it sends `launch.bridge_ready` with the exact launch
+ID, attach token and HQ nonce. It accepts only `{launch_id, bridge_ready:
+true}` before requesting `launch.attach`. HQ must answer only after it has
+verified a live B-only HMAC broker bind and Machine-attested start/endpoint
+identities, and must recheck those when attach starts ACP. Current HQ does not
+implement that operation, so this route fails closed. B-only token/proof
+handoff over the fixed inherited pipe, a race-resistant directory handoff,
+and physical cross-UID verification remain production gates.
 
 `--profile managed-protected` refuses before HQ admission while
 Machine-authenticated protected launch inputs are unavailable. The entry
 point also refuses a protected Hello grant before `Equip`. Omitting
 `--profile` selects the default. Supplying it without a value stops startup
 before HQ admission.
-The default `managed-cooperative` request preserves existing hosts: it
-uses local spawn only when HQ explicitly reports `host.launch_unavailable`.
+The default `managed-cooperative` request preserves existing hosts: it uses
+local spawn only when HQ explicitly reports `host.launch_unavailable` and the
+runner has not been marked as HQ-started.
 Before request-time fallback it proves the admitted runtime may use HQ's
 shared broker; an account-bound runtime with no returned endpoint fails
 closed. If attach fails after a reservation returned its verified endpoint,
@@ -114,9 +144,15 @@ the launch account boundary still needs independent enforcement.
 
 It writes `host/members.sock` (0600, in a 0700 directory) for cooperative
 local fallback. An HQ launch gets a per-launch 0660 member socket in the
-harness account's verified endpoint directory; the entry point bounds
+harness account's verified endpoint directory in the current pilot. A
+separate-runner launch must supply `member_endpoint` with `directory`,
+`owner_uid`, `group_gid`, `dir_mode` (2750), `socket_mode` (660) and
+`peer_uids` (the distinct runner and bridge UIDs),
+alongside `member_socket`. This route refuses local adapter
+fallback if attach fails. The entry point bounds
 unauthenticated connections, requires the member token within five seconds,
-and removes the socket on stop. It also writes `comms/notes/<note_id>.json`
+and joins in-flight kernel peer checks before removing the socket on stop. It
+also writes `comms/notes/<note_id>.json`
 and, for local fallback, each member's `home/<member>/`.
 
 ## Protected preflight placement

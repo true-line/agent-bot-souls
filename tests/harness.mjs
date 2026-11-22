@@ -33,7 +33,7 @@ export const startHQ = (options = {}) => hqHarness.startHQ({ plugins: [brokerPlu
 // A transparent test proxy for admission replies. It keeps the real pinned
 // HQ on both sides of the boundary while allowing a regression to corrupt or
 // downgrade one selected reply. Broker traffic is forwarded unchanged.
-export async function hqProxy(hq, transformReply = ({ reply }) => reply) {
+export async function hqProxy(hq, transformReply = ({ reply }) => reply, { interceptRequest } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'souls-hq-proxy-'));
   const servers = [];
   const sockets = new Set();
@@ -54,6 +54,11 @@ export async function hqProxy(hq, transformReply = ({ reply }) => reply) {
     }
     readLines(client, (line) => {
       const request = JSON.parse(line);
+      const intercepted = interceptRequest?.(request);
+      if (intercepted !== undefined) {
+        Promise.resolve(intercepted).then((response) => writeLine(client, response), close);
+        return;
+      }
       pending.set(request.id, request);
       writeLine(upstream, request);
     }, close);
