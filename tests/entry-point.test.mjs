@@ -568,6 +568,42 @@ test('an isolated member endpoint withholds bridge bootstrap and refuses attach 
   }
 });
 
+test('a separate runner launch cannot omit its Machine-assigned member endpoint', async (suite) => {
+  for (const scenario of ['runner endpoint marker', 'HQ-started explicit endpoints']) await suite.test(scenario, async () => {
+    const isolated = accountHQ();
+    const hq = await startHQ(isolated.options);
+    const operations = [];
+    const proxy = await hqProxy(hq, ({ op, reply }) => {
+      operations.push(op);
+      if (op === 'launch' && reply.ok && scenario === 'runner endpoint marker') {
+        return { ...reply, result: { ...reply.result, runner_endpoint: { socketPath: join(proxy.home, 'admission.sock') } } };
+      }
+      return reply;
+    });
+    const root = makeSoul();
+    let soul;
+    try {
+      const separate = scenario === 'HQ-started explicit endpoints';
+      soul = await startSoul({ root, ...(separate
+        ? { admissionSocket: join(proxy.home, 'admission.sock'), brokerSocket: join(proxy.home, 'broker.sock'),
+          env: { ...process.env, AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH: '1' } }
+        : { hqHome: proxy.home }), renewEveryMs: 0 });
+      await assert.rejects(soul.prompt('refuse an incomplete R/B launch'), /Machine-assigned member endpoint/);
+      assert.equal(operations.filter((op) => op === 'launch.stop').length, 1, 'the reservation is stopped');
+      assert.equal(operations.includes('launch.attach'), false);
+      assert.equal(operations.includes('launch.bridge_ready'), false);
+      assert.equal(soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+      assert.equal(isolated.launch.calls.some((call) => call.args[1] === '-H'), false);
+    } finally {
+      await soul?.stop();
+      await proxy.done();
+      await hq.done();
+      rmSync(root, { recursive: true, force: true });
+      isolated.layout.remove();
+    }
+  });
+});
+
 test('HQ-started mode refuses cooperative local adapter fallback', async () => {
   let t;
   try {
