@@ -2,7 +2,7 @@
 // agent-bot-souls: the Soul runtime's executable (platform PDR-0037),
 // reached through the shim as `agent-bot souls …`.
 //
-//   agent-bot-souls run  --soul DIR [--hq-home DIR] [--profile PROFILE]   the ACP front door, on stdio
+//   agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile PROFILE]
 //   agent-bot-souls chat --soul DIR [--hq-home DIR] [--profile PROFILE]   a terminal chat with the Soul
 //   agent-bot-souls member <op> [JSON]                a member's requests, from inside a member
 //   agent-bot-souls fake-adapter                      the fake ACP adapter (testing and demos)

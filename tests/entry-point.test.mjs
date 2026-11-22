@@ -6,8 +6,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { connect as netConnect, Server } from 'node:net';
+import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
 import { connectHq } from '../lib/hq-client.mjs';
@@ -494,6 +495,75 @@ test('an attach-time account launch failure falls back locally only in the coope
     assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-started').map((event) => event.launch), ['local']);
   } finally {
     await t?.done();
+    isolated.layout.remove();
+  }
+});
+
+test('an isolated member endpoint withholds bridge bootstrap and refuses attach fallback', { timeout: 10000 }, async () => {
+  const isolated = accountHQ();
+  const memberRoot = realpathSync(mkdtempSync(join(tmpdir(), 'sm-')));
+  const directory = join(memberRoot, 'start');
+  mkdirSync(directory);
+  const hq = await startHQ(isolated.options);
+  chownSync(directory, process.geteuid(), process.getgid());
+  chmodSync(directory, 0o2750);
+  let runnerToken;
+  let releaseReady;
+  let readyObserved;
+  let attachCalled = false;
+  const readyPending = new Promise((resolve) => { readyObserved = resolve; });
+  const proxy = await hqProxy(hq, ({ op, request, reply }) => {
+    if (op !== 'launch' || !reply.ok) return reply;
+    runnerToken = request.payload.env.AGENT_BOT_SOULS_MEMBER_TOKEN;
+    const st = statSync(directory);
+    const runnerPath = join(proxy.home, 'admission.sock');
+    return { ...reply, result: {
+      ...reply.result,
+      member_socket: join(directory, 'member.sock'),
+      member_endpoint: { directory, owner_uid: st.uid, group_gid: st.gid, dir_mode: 0o2750, socket_mode: 0o660, peer_uids: [st.uid, st.uid + 1] },
+      member_bridge_token: 'cd'.repeat(24), bridge_ready_nonce: 'ef'.repeat(32),
+      runner_endpoint: { directory: proxy.home, socketPath: runnerPath, peerUid: process.geteuid(),
+        ownerUid: process.geteuid(), groupGid: process.getgid(), dirMode: 0o2750, socketMode: 0o660 },
+    } };
+  }, { interceptRequest: (request) => {
+    if (request.op === 'launch.attach') {
+      attachCalled = true;
+      return { id: request.id, ok: false, host_refusal: { code: 'host.launch_unavailable', explanation: 'attach is not ready' } };
+    }
+    if (request.op !== 'launch.bridge_ready') return undefined;
+    return new Promise((resolve) => {
+      releaseReady = () => resolve({ id: request.id, ok: false,
+        host_refusal: { code: 'host.launch_unavailable', explanation: 'bridge bind unavailable' } });
+      readyObserved();
+    });
+  } });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, admissionSocket: join(proxy.home, 'admission.sock'),
+      brokerSocket: join(proxy.home, 'broker.sock'), renewEveryMs: 0 });
+    const prompt = soul.prompt('do not spawn this adapter locally');
+    prompt.catch(() => {});
+    await readyPending;
+    const member = await connectHq(join(directory, 'member.sock'));
+    try {
+      await member.request('hello', { token: runnerToken });
+      await assert.rejects(member.request('runtime'), (error) => error.code === 'souls.unknown_member');
+    } finally { await member.close(); }
+    releaseReady();
+    await assert.rejects(prompt,
+      (error) => error.code === 'host.launch_unavailable');
+    assert.equal(attachCalled, false, 'the runner never asks HQ to start ACP without B bind');
+    assert.equal(soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+    assert.equal(existsSync(join(directory, 'member.sock')), false, 'the refused launch removes its member socket');
+    assert.equal(isolated.launch.calls.some((call) => call.file !== '/usr/bin/sudo'), false);
+  } finally {
+    releaseReady?.();
+    await soul?.stop();
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(memberRoot, { recursive: true, force: true });
     isolated.layout.remove();
   }
 });
