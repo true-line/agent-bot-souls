@@ -145,7 +145,7 @@ test('cooperative CLI requires its fixed fd and assigned sockets before reading 
   assert.match(wrongFd.stderr, /requires inherited fd 3/);
   const noFd = spawnSync(process.execPath, [bin.pathname, ...args, '--cooperative-start-fd', '3'], { encoding: 'utf8' });
   assert.equal(noFd.status, 1);
-  assert.match(noFd.stderr, /fd 3 (is unavailable|read failed)/);
+  assert.match(noFd.stderr, /fd 3 (is unavailable|read failed|must be a pipe)/);
 });
 
 test('unverified cooperative fd 3 input cannot fall through to editable package startup', async () => {
