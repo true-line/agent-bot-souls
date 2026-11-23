@@ -2,7 +2,7 @@
 // agent-bot-souls: the Soul runtime's executable (platform PDR-0037),
 // reached through the shim as `agent-bot souls …`.
 //
-//   agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile PROFILE] [--protected-start-fd 3]
+//   agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile PROFILE] [--protected-start-fd 3 | --cooperative-start-fd 3]
 //   agent-bot-souls chat --soul DIR [--hq-home DIR] [--profile PROFILE]   a terminal chat with the Soul
 //   agent-bot-souls member <op> [JSON]                a member's requests, from inside a member
 //   agent-bot-souls fake-adapter                      the fake ACP adapter (testing and demos)
@@ -17,12 +17,14 @@ import { runFakeAdapter } from '../lib/fake-adapter.mjs';
 import { chat, serveAcp } from '../lib/front-door.mjs';
 import { connectMember } from '../lib/member.mjs';
 import { checkProtectedStart, readProtectedStart } from '../lib/protected-start.mjs';
+import { readCooperativeStart } from '../lib/cooperative-start.mjs';
+import { connectCooperativeAcp } from '../lib/cooperative-acp.mjs';
 import { checkProtectedActivation, readProtectedActivation } from '../lib/protected-activation.mjs';
 import { beginProtectedControl } from '../lib/protected-control.mjs';
 import { readProtectedSoulLayout } from '../lib/soul.mjs';
 
 const USAGE = `usage:
-  agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile managed-cooperative|managed-protected] [--protected-start-fd 3]
+  agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile managed-cooperative|managed-protected] [--protected-start-fd 3 | --cooperative-start-fd 3]
   agent-bot-souls chat --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile managed-cooperative|managed-protected]
   agent-bot-souls member <runtime|directives|handoffs|get|commit|route|note> [JSON]
   agent-bot-souls fake-adapter
@@ -40,7 +42,7 @@ const MEMBER_OPS = {
 
 function options(argv) {
   const out = {};
-  const optionsWithValues = ['--soul', '--hq-home', '--admission-socket', '--broker-socket', '--profile', '--protected-start-fd'];
+  const optionsWithValues = ['--soul', '--hq-home', '--admission-socket', '--broker-socket', '--profile', '--protected-start-fd', '--cooperative-start-fd'];
   for (let i = 0; i < argv.length; i += 2) {
     const option = argv[i];
     if (!optionsWithValues.includes(option)) throw new Error(`unknown argument ${option}`);
@@ -51,8 +53,11 @@ function options(argv) {
   }
   if (!out.soul) throw new Error('--soul DIR is required');
   if (out['protected-start-fd'] !== undefined && out['protected-start-fd'] !== '3') throw new Error('--protected-start-fd requires inherited fd 3');
+  if (out['cooperative-start-fd'] !== undefined && out['cooperative-start-fd'] !== '3') throw new Error('--cooperative-start-fd requires inherited fd 3');
+  if (out['protected-start-fd'] !== undefined && out['cooperative-start-fd'] !== undefined) throw new Error('fd 3 accepts one start profile');
   const explicit = out['admission-socket'] !== undefined || out['broker-socket'] !== undefined;
-  return { root: out.soul, protectedStartFd: out['protected-start-fd'] === undefined ? undefined : 3, ...(explicit
+  return { root: out.soul, protectedStartFd: out['protected-start-fd'] === undefined ? undefined : 3,
+    cooperativeStartFd: out['cooperative-start-fd'] === undefined ? undefined : 3, ...(explicit
     ? { admissionSocket: out['admission-socket'], brokerSocket: out['broker-socket'], ...(out['hq-home'] !== undefined ? { hqHome: out['hq-home'] } : {}) }
     : { hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq') }), requestedProfile: out.profile ?? 'managed-cooperative' };
 }
@@ -73,7 +78,7 @@ async function main([cmd, ...rest]) {
     return 0;
   }
   if (cmd === 'run' || cmd === 'chat') {
-    const { protectedStartFd, ...entryOptions } = options(rest);
+    const { protectedStartFd, cooperativeStartFd, ...entryOptions } = options(rest);
     if (protectedStartFd !== undefined) {
       if (cmd !== 'run' || entryOptions.requestedProfile !== 'managed-protected'
         || entryOptions.admissionSocket === undefined || entryOptions.brokerSocket === undefined) {
@@ -110,15 +115,29 @@ async function main([cmd, ...rest]) {
       }
       return 0;
     }
+    if (cooperativeStartFd !== undefined) {
+      if (cmd !== 'run' || entryOptions.requestedProfile !== 'managed-cooperative'
+        || entryOptions.admissionSocket === undefined || entryOptions.brokerSocket === undefined) {
+        throw new Error('cooperative fd 3 is only for run with managed-cooperative and both assigned HQ sockets');
+      }
+      entryOptions.cooperativeStart = readCooperativeStart(cooperativeStartFd);
+    }
     const soul = await startSoul({ ...entryOptions, log: (e) => { if (cmd === 'run' || e.event !== 'member-stderr') process.stderr.write(`${JSON.stringify(e)}\n`); } });
     let stop;
     const signal = new Promise((resolve) => { stop = () => resolve(); });
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);
     let failure;
+    let acp;
     try {
+      if (cooperativeStartFd !== undefined) {
+        if (!soul.cooperativeAcp) throw new Error('verified cooperative ACP ticket is unavailable');
+        acp = await connectCooperativeAcp(soul.cooperativeAcp);
+      }
       const frontDoor = cmd === 'run' ? serveAcp : chat;
-      const serving = frontDoor({ soul, input: process.stdin, output: process.stdout }).catch((error) => { failure = error; });
+      const serving = frontDoor({ soul, input: acp ?? process.stdin, output: acp ?? process.stdout })
+        .catch((error) => { failure = error; });
+      acp?.resume();
       await Promise.race([serving, signal]);
       try { await soul.stop(); }
       catch (error) {
@@ -126,7 +145,12 @@ async function main([cmd, ...rest]) {
         throw error;
       }
       if (failure) throw failure;
+    } catch (error) {
+      try { await soul.stop(); }
+      catch (cleanupError) { throw new AggregateError([error, cleanupError], `${error.message}\n${cleanupError.message}`); }
+      throw error;
     } finally {
+      acp?.destroy();
       process.off('SIGINT', stop);
       process.off('SIGTERM', stop);
     }
