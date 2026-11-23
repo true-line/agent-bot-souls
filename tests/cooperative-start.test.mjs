@@ -117,11 +117,11 @@ test('direct fd 3 refuses a signed B transport or a changed launch-record transp
   const changedRecords = wrapper();
   changedRecords.launch_input_records.adapter_transport = 'brokered-b';
   assert.throws(() => verifyCooperativeStart(changedRecords, root, pin, now, identity),
-    /direct-Comms transport differs/);
+    /adapter transport differs/);
   const addedBridge = wrapper();
   addedBridge.launch_input_records.bridge_launch_sha256 = `sha256:${'a'.repeat(64)}`;
   assert.throws(() => verifyCooperativeStart(addedBridge, root, pin, now, identity),
-    /direct-Comms transport differs/);
+    /adapter transport differs/);
 });
 
 test('first C connect retries only a transient socket race before signed expiry', async () => {
