@@ -67,7 +67,7 @@ function publishOutcome(reservation, change = () => {}) {
     contract: 'machine/v3', kind: 'soul-cooperative-publish-outcome', schema_version: 3,
     reservation_sha256: start.reservationSha256,
     bridge_assignment_sha256: `sha256:${'c'.repeat(64)}`,
-    order_sha256: `sha256:${'d'.repeat(64)}`,
+    order_sha256: sha(requestBytes),
     request_sha256: sha(requestBytes),
     request_device: requestIdentity.device, request_inode: requestIdentity.inode,
     request_birthtime_ns: requestIdentity.birthtime_ns,
@@ -118,6 +118,8 @@ test('B publication requires a separate pinned, signed outcome for the exact req
   assert.throws(() => verify(missingMode), /observed request and signed start/);
   const wrongMode = publishOutcome(reservation, (outcome) => { outcome.publication_mode = 'intent'; });
   assert.throws(() => verify(wrongMode), /observed request and signed start/);
+  const wrongOrder = publishOutcome(reservation, (outcome) => { outcome.order_sha256 = `sha256:${'d'.repeat(64)}`; });
+  assert.throws(() => verify(wrongOrder), /observed request and signed start/);
   const recovered = publishOutcome(reservation, (outcome) => { outcome.publication_mode = 'recovered'; });
   assert.throws(() => verify(recovered), /observed request and signed start/);
   const alteredEnvelope = Buffer.from(valid.value.publish_outcome_envelope_base64url, 'base64url');
