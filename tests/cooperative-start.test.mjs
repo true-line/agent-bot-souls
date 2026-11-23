@@ -98,14 +98,30 @@ function resigned(change) {
   return { value: wrapper(Buffer.from(canonicalize(signed))), pin: rawPin };
 }
 
-test('Contracts #74 cooperative reservation is signature-verified and bound to its frozen roots', () => {
+test('Contracts #78 direct-Comms reservation is signature-verified and bound to its frozen roots', () => {
   const plan = verifyCooperativeStart(wrapper(), root, pin, now, identity);
+  assert.equal(payload.adapter_transport, 'direct-comms');
+  assert.equal(vector.launch_input_records.adapter_transport, 'direct-comms');
   assert.equal(plan.hostId, 'synthetic-host');
   assert.equal(plan.runtimeRoot, payload.assignment.runtime_root);
   assert.equal(plan.definitionRoot, root);
   assert.equal(plan.launchInputMeasurement, payload.measurement_binding.launch_input_measurement);
   assert.equal(plan.rInventory.sidecar.sha256, payload.measurement_binding.r_inventory.sidecar.sha256);
   assert.equal(plan.expiresAt, payload.expires_at);
+});
+
+test('direct fd 3 refuses a signed B transport or a changed launch-record transport', () => {
+  const wrongMode = resigned((changed) => { changed.adapter_transport = 'brokered-b'; });
+  assert.throws(() => verifyCooperativeStart(wrongMode.value, root, wrongMode.pin, now, identity),
+    /reservation does not bind/);
+  const changedRecords = wrapper();
+  changedRecords.launch_input_records.adapter_transport = 'brokered-b';
+  assert.throws(() => verifyCooperativeStart(changedRecords, root, pin, now, identity),
+    /direct-Comms transport differs/);
+  const addedBridge = wrapper();
+  addedBridge.launch_input_records.bridge_launch_sha256 = `sha256:${'a'.repeat(64)}`;
+  assert.throws(() => verifyCooperativeStart(addedBridge, root, pin, now, identity),
+    /direct-Comms transport differs/);
 });
 
 test('first C connect retries only a transient socket race before signed expiry', async () => {
