@@ -79,11 +79,13 @@ test('A-signed exact frozen two-member assignment is only a pre-launch claim', (
   assert.equal(verify(payload).payload.members.length, 2);
 });
 
-test('member-set assignment rejects altered, missing, wrong-plan and stale claims', () => {
+test('member-set assignment rejects altered, missing, wrong-host, wrong-plan and stale claims', () => {
   assert.throws(() => verify({ ...payload, members: [members[0]] }), /invalid payload shape/);
   assert.throws(() => verify({ ...payload, members: [members[0], { ...members[1], role: 'lead' }] }), /measured stock files/);
   assert.throws(() => verify({ ...payload, members: [members[0], { ...members[1], adjacent_cli_sha256: `sha256:${'f'.repeat(64)}` }] }), /measured stock files/);
   assert.throws(() => verify({ ...payload, owner_plan_member_set_sha256: `sha256:${'f'.repeat(64)}` }), /owner-reviewed projection/);
+  assert.throws(() => verify(payload, { expected: { ...expected, host_id: 'other-host' } }), /host_id differs/);
+  assert.throws(() => verify(payload, { expected: { ...expected, runner_uid: 399 } }), /runner_uid differs/);
   assert.throws(() => verify(payload, { expected: { ...expected, bridge: { ...payload.bridge, uid: 399 } } }), /bridge differs/);
   assert.throws(() => verify(payload, { now: Date.parse('2026-11-23T18:00:21Z') }), /expired/);
   assert.throws(() => verify(payload, { machinePin: Buffer.alloc(32) }), /signer differs/);
