@@ -30,16 +30,22 @@ async function readFd3(bytes) {
   const script = `import { readCooperativeStart } from ${JSON.stringify(moduleUrl.href)};\n`
     + 'try { process.stdout.write(JSON.stringify(readCooperativeStart(3))); }\n'
     + 'catch (error) { process.stderr.write(error.message); process.exitCode = 1; }';
-  const child = spawn('bash', ['-c', 'exec 3< "$1"; shift; exec "$@"', '--', fifo,
-    process.execPath, '--input-type=module', '-e', script], { stdio: ['ignore', 'pipe', 'pipe'] });
-  let stdout = '', stderr = '';
-  child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
-  child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
   try {
-    const writer = openSync(fifo, constants.O_WRONLY);
-    try { writeFileSync(writer, bytes); } finally { closeSync(writer); }
-    const code = await new Promise((resolve) => child.once('close', resolve));
-    return { code, stdout, stderr };
+    const reader = openSync(fifo, constants.O_RDONLY | constants.O_NONBLOCK);
+    try {
+      const writer = openSync(fifo, constants.O_WRONLY);
+      let child;
+      try {
+        child = spawn(process.execPath, ['--input-type=module', '-e', script],
+          { stdio: ['ignore', 'pipe', 'pipe', reader] });
+        writeFileSync(writer, bytes);
+      } finally { closeSync(writer); }
+      let stdout = '', stderr = '';
+      child.stdout.setEncoding('utf8').on('data', (chunk) => { stdout += chunk; });
+      child.stderr.setEncoding('utf8').on('data', (chunk) => { stderr += chunk; });
+      const code = await new Promise((resolve) => child.once('close', resolve));
+      return { code, stdout, stderr };
+    } finally { closeSync(reader); }
   } finally { rmSync(directory, { recursive: true, force: true }); }
 }
 
