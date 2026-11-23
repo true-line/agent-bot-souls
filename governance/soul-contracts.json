@@ -1,14 +1,14 @@
 {
   "schema_version": 1,
   "repository": "https://github.com/true-line/soul-contracts.git",
-  "tag": "v0.7.0",
-  "commit": "3eadde87b5b0913296c223a2b04fc534ab42bd52",
+  "tag": "v0.9.0",
+  "commit": "e668085d31a02a7e72928a50849494a7b00ec742",
   "paths": [
     "errors",
     "fixtures",
     "schemas"
   ],
   "digest_algorithm": "sha256-manifest-v1",
-  "digest": "sha256:f5c4338843c3f1023ea427acf78252a103d13810c82b50a4b93a146ee1b1137c",
-  "files": 394
+  "digest": "sha256:9b929a2c9ecbf304380a8588e7a20c2df1f3148d3390ec2d9bea09d48f7a3e38",
+  "files": 428
 }
