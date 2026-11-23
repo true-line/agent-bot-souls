@@ -44,13 +44,17 @@ test('legacy account endpoint keeps the broker beside its member socket', () => 
   assert.equal(memberEndpoint(launch).broker, '/tmp/harness/broker.sock');
 });
 
-test('cooperative B endpoint retains the signed parent identity and bridge peer', () => {
+test('cooperative B endpoint retains the signed parent identity and bridge peer', (t) => {
   const root = mkdtempSync(join(tmpdir(), 'scm-'));
   const directory = join(realpathSync(root), 's');
   try {
     mkdirSync(directory);
     chmodSync(directory, 0o2750);
     const st = statSync(directory, { bigint: true });
+    if (Number(st.gid) === process.geteuid()) {
+      t.skip('the test account has no distinct directory group to model B');
+      return;
+    }
     const member_socket = join(directory, 'm.sock');
     const member_endpoint = {
       directory, socket_path: member_socket, owner_uid: process.geteuid(),
