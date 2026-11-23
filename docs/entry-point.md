@@ -108,6 +108,9 @@ and device, inode, and birthtime against that projection and Machine's observed
 identity. The B watched request is A-owned, runner-group `0640`; this exact
 mode belongs in the reviewed install plan. The direct request stays `0440`.
 R never reopens the watched request path to make this decision.
+The signed outcome's `publication_mode` is `direct`: A signs it only after
+the watched rename and sync. A read-only recovery check may return that same
+outcome but cannot synthesize a newly signed recovered publication.
 The current H/Comms B ingress design covers the installed deterministic test
 provider: B checks the measured local Messages request before asking H for the
 one-use fixed response. It does not establish general vendor internet forwarding.

@@ -72,6 +72,7 @@ function publishOutcome(reservation, change = () => {}) {
     request_birthtime_ns: requestIdentity.birthtime_ns,
     installation_id: start.installationId, start_id: start.startId, launch_id: start.launchId,
     published_at: '2026-11-22T14:15:19Z', expires_at: '2026-11-22T14:15:35Z',
+    publication_mode: 'direct',
   };
   change(outcome);
   const payloadBytes = Buffer.from(canonicalize(outcome));
@@ -99,11 +100,25 @@ test('B publication requires a separate pinned, signed outcome for the exact req
   assert.throws(() => verify({ ...valid, value: { ...valid.value,
     request_identity: { ...valid.value.request_identity, inode: '346' } } }),
     /observed request and signed start/);
+  assert.throws(() => verify({ ...valid, value: { ...valid.value,
+    request_identity: { ...valid.value.request_identity, owner_uid: 0 } } }),
+    /observed B publication handoff/);
+  assert.throws(() => verify({ ...valid, value: { ...valid.value,
+    request_identity: { ...valid.value.request_identity, mode: 0o440 } } }),
+    /observed B publication handoff/);
+  assert.throws(() => verify({ ...valid, value: { ...valid.value,
+    publish_outcome_envelope_base64url: '' } }), /noncanonical base64url/);
   assert.throws(() => verify(valid, Buffer.alloc(32)), /signer differs/);
   assert.throws(() => verify(valid, reservation.pin, Date.parse('2026-11-22T14:15:35Z')),
     /observed request and signed start/);
   const wrongLaunch = publishOutcome(reservation, (outcome) => { outcome.launch_id = 'ln_ffffffffffffffffffffffff'; });
   assert.throws(() => verify(wrongLaunch), /observed request and signed start/);
+  const missingMode = publishOutcome(reservation, (outcome) => { delete outcome.publication_mode; });
+  assert.throws(() => verify(missingMode), /observed request and signed start/);
+  const wrongMode = publishOutcome(reservation, (outcome) => { outcome.publication_mode = 'intent'; });
+  assert.throws(() => verify(wrongMode), /observed request and signed start/);
+  const recovered = publishOutcome(reservation, (outcome) => { outcome.publication_mode = 'recovered'; });
+  assert.throws(() => verify(recovered), /observed request and signed start/);
   const alteredEnvelope = Buffer.from(valid.value.publish_outcome_envelope_base64url, 'base64url');
   alteredEnvelope[alteredEnvelope.length - 2] ^= 1;
   assert.throws(() => verify({ ...valid, value: { ...valid.value,
