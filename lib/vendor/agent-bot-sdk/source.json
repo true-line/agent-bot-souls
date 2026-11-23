@@ -1,6 +1,6 @@
 {
   "repository": "https://github.com/true-line/agent-bot-hq",
-  "commit": "f57c818459de7dd80148d4ba040b619f682e37ad",
+  "commit": "777b00f2e8927786abc7355a9882eb071a25a144",
   "files": {
     "sdk/errors.mjs": "fde3ecf83405173b60a105aa88a7deb1992c09de8743253f3aeee8c6a7eb6177",
     "sdk/wire/canonical-json.mjs": "331ffdcb00e287552b38b215a0c5dc19340b86d6503863c30d3785bdddc0580b",
