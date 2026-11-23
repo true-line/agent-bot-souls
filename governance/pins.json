@@ -10,7 +10,7 @@
   },
   "agent-bot-machine": {
     "repository": "https://github.com/true-line/agent-bot-machine",
-    "commit": "1c76b56506ca90a39742d2523c8b541d372423b2",
+    "commit": "ec87781e8f915f4078d2c905fb1609c6641dd564",
     "profile": "internal/members/darwin/harness-egress.sb",
     "profile_sha256": "717fd0fa41cf25ac36cc786c357c60814d90e19ec47497614e3ca2adf65f8f86"
   }
