@@ -4,6 +4,7 @@ import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { canonicalize } from '../lib/contracts.mjs';
 import { verifyMemberSetAdmission, verifyMemberSetAssignment, verifyMemberSetLaunch } from '../lib/member-set-assignment.mjs';
 import { verifyMemberSetAttach } from '../lib/member-set-attach.mjs';
+import { verifyCooperativeMemberSetAttach } from '../lib/cooperative-member-attach.mjs';
 
 const purpose = 'agent-bot/stage2a-member-set-assignment/v1';
 const hash = (value) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -123,9 +124,9 @@ test('final Hello and each ACP attach must match the signed member row', () => {
 
 test('prestarted attach requires the signed child, B policy and aggregate Ready chain', () => {
   const assignment = verify(payload);
-  const authority = (purposeName, value) => {
+  const authority = (purposeName, value, schemaVersion = 1) => {
     const bytes = jcs(value);
-    return jcs({ schema_version: 1, purpose: purposeName,
+    return jcs({ schema_version: schemaVersion, purpose: purposeName,
       issuer_public_key_base64url: machinePin.toString('base64url'),
       payload_sha256: hash(bytes), payload_base64url: bytes.toString('base64url'),
       signature_base64url: sign(null, Buffer.concat([Buffer.from(purposeName + '\0'), bytes]),
@@ -301,14 +302,42 @@ test('prestarted attach requires the signed child, B policy and aggregate Ready 
       child_observation_envelope_sha256: hash(cooperativeChildBytes) };
     return { ...row, bridge_arm, bridge_arm_receipt_sha256: hash(jcs(bridge_arm)) };
   });
-  const cooperativeReady = { ...ready, ...cooperativeIdentity,
+  const observedB = { contract: 'machine/v3', kind: 'soul-cooperative-b-observed',
+    schema_version: 3, reservation_sha256: reservation,
+    bridge_assignment_sha256: cooperativePayload.b_authority.envelope_sha256,
+    bind_receipt_sha256: hash('H bind'), installation_id: payload.installation_id,
+    start_id: payload.start_id, launch_id: `ln_${'3'.repeat(24)}`,
+    plan_id: payload.plan_id, plan_digest: payload.plan_digest,
+    hq_epoch: payload.hq_epoch, grant_nonce: Buffer.alloc(32, 1).toString('base64url'),
+    launcher: { pid: 3901, uid: 331, gid: 331,
+      start_seconds: 1795456803, start_micros: 0 },
+    bridge: { pid: 3902, uid: 332, gid: 332,
+      start_seconds: 1795456804, start_micros: 0 },
+    relay_socket: { path: cooperativeRelay.socket_path,
+      socket: { uid: 332, gid: 331, device: '21', inode: '22', mode: 0o660 } },
+    relay_socket_birthtime_ns: '23', observed_at: '2026-11-23T18:00:08Z',
+    expires_at: '2026-11-23T18:00:19Z' };
+  const observedBBytes = authority('agent-bot/soul-cooperative-b-observed/v3', observedB, 3);
+  const cooperativeReady = { contract: 'machine/v3', kind: 'soul-cooperative-member-ready',
+    schema_version: 3, profile_in_force: 'managed-cooperative',
+    host_id: payload.host_id, installation_id: payload.installation_id,
+    start_id: payload.start_id, hq_epoch: payload.hq_epoch,
+    reservation_sha256: reservation,
     assignment_envelope_sha256: cooperativeAssignment.envelopeSha256,
     child_observation_envelope_sha256: hash(cooperativeChildBytes),
     member_b_authority_envelope_sha256: hash(cooperativePolicyBytes),
     provisional_hq_mapping_sha256: hash(jcs(cooperativeMap)),
-    members: cooperativeRows };
-  const cooperativeReadyBytes = authority('agent-bot/stage2a-member-set-ready/v1',
-    cooperativeReady);
+    bridge_observed_sha256: hash(observedBBytes),
+    members: cooperativeRows.map((row, i) => ({ member_id: row.member_id,
+      member_launch_id: row.launch_id, member_selector: row.member_selector,
+      grant_sha256: observed[i].grant_sha256,
+      launcher_process: observed[i].launcher_process,
+      child_process: observed[i].child_process,
+      h_observation_sha256: hash(`H observation ${i}`),
+      b_arm_receipt_sha256: row.bridge_arm_receipt_sha256 })),
+    issued_at: '2026-11-23T18:00:09Z', expires_at: '2026-11-23T18:00:17Z' };
+  const cooperativeReadyBytes = authority('agent-bot/soul-cooperative-member-ready/v3',
+    cooperativeReady, 3);
   const cooperativeResult = { ...result, member_socket: cooperativeEndpoint.socket_path,
     member_endpoint: cooperativeEndpoint,
     child_observation_envelope_base64url: cooperativeChildBytes.toString('base64url'),
@@ -316,13 +345,106 @@ test('prestarted attach requires the signed child, B policy and aggregate Ready 
     member_b_authority_envelope_base64url: cooperativePolicyBytes.toString('base64url'),
     member_b_authority_envelope_sha256: hash(cooperativePolicyBytes),
     ready_envelope_base64url: cooperativeReadyBytes.toString('base64url'),
-    ready_envelope_sha256: hash(cooperativeReadyBytes) };
+    ready_envelope_sha256: hash(cooperativeReadyBytes),
+    bridge_observed_envelope_base64url: observedBBytes.toString('base64url'),
+    bridge_arm_rows_base64url: cooperativeRows.map((row) =>
+      jcs(row.bridge_arm).toString('base64url')) };
   const cooperativeStart = { ...start, adapterTransport: 'brokered-b',
-    memberEndpoint: cooperativeEndpoint, memberSocket: cooperativeEndpoint.socket_path };
-  assert.equal(verifyMemberSetAttach(cooperativeResult, cooperativeStart,
-    cooperativeAssignment, { admitted_runtimes: runtimes }, machinePin, at)
-    .ready.members.length, 2);
-  assert.throws(() => verifyMemberSetAttach({ ...cooperativeResult, member_endpoint: {
-    ...cooperativeEndpoint, parent_inode: '99' } }, cooperativeStart, cooperativeAssignment,
-  { admitted_runtimes: runtimes }, machinePin, at), /signed member or endpoint/);
+    memberEndpoint: cooperativeEndpoint, memberSocket: cooperativeEndpoint.socket_path,
+    relayEndpoint: cooperativeRelay, relaySocket: cooperativeRelay.socket_path,
+    launchId: observedB.launch_id };
+  const relayCheck = (candidateStart, identity) => {
+    assert.equal(candidateStart, cooperativeStart);
+    assert.deepEqual(identity, { path: cooperativeRelay.socket_path, uid: 332, gid: 331,
+      mode: 0o660, device: '21', inode: '22', birthtime_ns: '23' });
+  };
+  const verifyCooperative = (candidate = cooperativeResult, candidateStart = cooperativeStart) =>
+    verifyCooperativeMemberSetAttach(candidate, candidateStart, cooperativeAssignment,
+      { admitted_runtimes: runtimes }, machinePin, at, relayCheck);
+  assert.equal(verifyCooperative().ready.members.length, 2);
+  assert.throws(() => verifyMemberSetAttach(cooperativeResult, cooperativeStart,
+    cooperativeAssignment, { admitted_runtimes: runtimes }, machinePin, at),
+  /endpoint parent is unavailable|relay socket is unavailable/);
+  assert.throws(() => verifyCooperative({ ...cooperativeResult, member_endpoint: {
+    ...cooperativeEndpoint, parent_inode: '99' } }), /signed member or endpoint/);
+  assert.throws(() => verifyCooperative({ ...cooperativeResult,
+    bridge_observed_envelope_base64url: observedBBytes.toString('base64url').slice(1) }),
+  /envelope digest differs|canonical/);
+  const wrongBBytes = authority('agent-bot/soul-cooperative-b-observed/v3', {
+    ...observedB, relay_socket_birthtime_ns: '24' }, 3);
+  assert.throws(() => verifyCooperative({ ...cooperativeResult,
+    bridge_observed_envelope_base64url: wrongBBytes.toString('base64url') }),
+  /envelope digest differs/);
+  const signedChangedB = (change) => {
+    const bytes = authority('agent-bot/soul-cooperative-b-observed/v3',
+      { ...observedB, ...change }, 3);
+    const updatedReadyBytes = authority('agent-bot/soul-cooperative-member-ready/v3',
+      { ...cooperativeReady, bridge_observed_sha256: hash(bytes) }, 3);
+    return { ...cooperativeResult,
+      bridge_observed_envelope_base64url: bytes.toString('base64url'),
+      ready_envelope_base64url: updatedReadyBytes.toString('base64url'),
+      ready_envelope_sha256: hash(updatedReadyBytes) };
+  };
+  assert.throws(() => verifyCooperative(signedChangedB({ installation_id: 'inst_other' })),
+    /B observation differs/);
+  assert.throws(() => verifyCooperative(signedChangedB({ expires_at: '2026-11-23T18:00:10Z' })),
+    /expired or stale|exceeds signed/);
+  assert.throws(() => verifyCooperative(signedChangedB({ relay_socket_birthtime_ns: '24' })),
+    /Expected values to be strictly deep-equal/);
+  const wrongHostReady = authority('agent-bot/soul-cooperative-member-ready/v3',
+    { ...cooperativeReady, host_id: 'host_other' }, 3);
+  assert.throws(() => verifyCooperative({ ...cooperativeResult,
+    ready_envelope_base64url: wrongHostReady.toString('base64url'),
+    ready_envelope_sha256: hash(wrongHostReady) }), /Ready or B observation differs/);
+  const otherArm = { ...cooperativeRows[0].bridge_arm, adapter_pid: 9999 };
+  assert.throws(() => verifyCooperative({ ...cooperativeResult,
+    bridge_arm_rows_base64url: [jcs(otherArm).toString('base64url'),
+      cooperativeResult.bridge_arm_rows_base64url[1]] }), /member child, B arm/);
+  assert.throws(() => verifyCooperative({ ...cooperativeResult,
+    bridge_arm_rows_base64url: [...cooperativeResult.bridge_arm_rows_base64url].reverse() }),
+  /member child, B arm/);
+  assert.throws(() => verifyCooperative({ ...cooperativeResult,
+    bridge_arm_rows_base64url: cooperativeResult.bridge_arm_rows_base64url.slice(0, 1) }),
+  /member rows/);
+  assert.throws(() => verifyCooperative({ ...cooperativeResult,
+    bridge_arm_rows_base64url: [cooperativeResult.bridge_arm_rows_base64url[0],
+      cooperativeResult.bridge_arm_rows_base64url[1] + '='] }), /noncanonical base64url/);
+  // Keep all grown strings within their published schema maxima while
+  // measuring the complete encoded H result at the exact profile cap.
+  const longPolicy = { ...cooperativePolicy, members: cooperativePolicy.members.map((row) => ({
+    ...row, qualification: { ...row.qualification, response_text: 'x'.repeat(2048) } })) };
+  const longPolicyBytes = authority('agent-bot/stage2a-b-member-authority/v1', longPolicy);
+  const longReadyBytes = authority('agent-bot/soul-cooperative-member-ready/v3', {
+    ...cooperativeReady, member_b_authority_envelope_sha256: hash(longPolicyBytes) }, 3);
+  const baseBoundary = { ...cooperativeResult,
+    member_b_authority_envelope_base64url: longPolicyBytes.toString('base64url'),
+    member_b_authority_envelope_sha256: hash(longPolicyBytes),
+    ready_envelope_base64url: longReadyBytes.toString('base64url'),
+    ready_envelope_sha256: hash(longReadyBytes) };
+  const withDirectory = (length) => {
+    const directory = '/fixture/' + 'd'.repeat(length);
+    const socketPath = directory + '/a.sock';
+    return { result: { ...baseBoundary, runner_endpoint: {
+      socketPath, peerUid: 331, directory } },
+    start: { ...cooperativeStart, admissionSocket: socketPath } };
+  };
+  let low = 0; let high = 4000;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (Buffer.byteLength(canonicalize(withDirectory(mid).result)) <= 32768) low = mid;
+    else high = mid - 1;
+  }
+  const nearCap = withDirectory(low);
+  const headroom = 32768 - Buffer.byteLength(canonicalize(nearCap.result));
+  assert.ok(headroom >= 0 && headroom <= 4096 - nearCap.result.cwd.length);
+  const atCap = { ...nearCap.result, cwd: nearCap.result.cwd + 'x'.repeat(headroom) };
+  assert.equal(Buffer.byteLength(canonicalize(atCap)), 32768);
+  const verifyAtCap = (candidate) => verifyCooperativeMemberSetAttach(candidate,
+    nearCap.start, cooperativeAssignment, { admitted_runtimes: runtimes }, machinePin, at,
+    (_candidateStart, identity) => assert.equal(identity.birthtime_ns, '23'));
+  assert.equal(verifyAtCap(atCap).ready.kind, 'soul-cooperative-member-ready');
+  assert.throws(() => verifyAtCap({ ...atCap, cwd: atCap.cwd + 'x' }),
+    /invalid cooperative H attach result/);
+  assert.throws(() => verifyCooperative(cooperativeResult, {
+    ...cooperativeStart, startId: `st_${'9'.repeat(24)}` }), /invalid cooperative H attach result/);
 });
