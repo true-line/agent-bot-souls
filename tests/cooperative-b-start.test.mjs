@@ -7,7 +7,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { canonicalize } from '../lib/contracts.mjs';
-import { attachCooperative, verifyCooperativeBMemberPath, verifyCooperativeBParents, verifyCooperativeBPublishOutcome, verifyCooperativeBRelaySocket, verifyCooperativeStart } from '../lib/cooperative-start.mjs';
+import { attachCooperative, requestCooperativeMemberSetOwnerTicket, verifyCooperativeBMemberPath, verifyCooperativeBParents, verifyCooperativeBPublishOutcome, verifyCooperativeBRelaySocket, verifyCooperativeStart } from '../lib/cooperative-start.mjs';
 import { MACHINE_PIN } from '../lib/protected-start.mjs';
 
 const vector = JSON.parse(readFileSync(new URL('./fixtures/cooperative-start-b.synthetic.json', import.meta.url)));
@@ -289,10 +289,53 @@ test('B CLI accepts only the assigned member and relay pair with FD3', () => {
   assert.match(incomplete.stderr, /one exact socket layout/);
 });
 
-test('B start cannot consume the direct C attach reply or expose a broker path', async () => {
+test('B start refuses the C attach before a verified member-set assignment', async () => {
   const start = verifyCooperativeStart(fd3(), payload.assignment.package_root, pin, now, identity);
   let requested = false;
   await assert.rejects(attachCooperative({ request: async () => { requested = true; } }, fd3(), start),
-    /B attach and live bridge bind are not available/);
+    /B attach requires the verified two-member assignment/);
   assert.equal(requested, false);
+});
+
+test('two-member B C attach withholds the owner ticket until the same signed Ready', async () => {
+  const start = verifyCooperativeStart(fd3(), payload.assignment.package_root, pin, now, identity);
+  const assignment = { envelopeSha256: sha('assignment'), payload: {
+    profile_in_force: 'managed-cooperative', bridge: { endpoints: {
+      broker: { socket_path: '/fixture/broker.sock' },
+    } },
+  } };
+  const authority = sha('B authority');
+  const ready = sha('aggregate Ready');
+  const first = { schema: 'hq/cooperative-member-set-attach/v3',
+    reservation_sha256: start.reservationSha256, start_id: start.startId,
+    launch_id: start.launchId, broker_socket_path: '/fixture/broker.sock',
+    member_set_assignment_envelope_sha256: assignment.envelopeSha256,
+    member_b_authority_envelope_sha256: authority };
+  const calls = [];
+  const hq = { request: async (op, request) => {
+    calls.push({ op, request });
+    return op === 'cooperative.attach.v3' ? first : {
+      schema: 'hq/cooperative-owner-acp-ticket/v3',
+      reservation_sha256: start.reservationSha256, start_id: start.startId,
+      launch_id: start.launchId, ready_envelope_sha256: ready,
+      acp_ticket_base64url: Buffer.alloc(32, 5).toString('base64url'),
+    };
+  } };
+  assert.deepEqual(await attachCooperative(hq, fd3(), start, assignment), first);
+  assert.deepEqual(calls[0], { op: 'cooperative.attach.v3', request: {
+    reservation_envelope_base64url: fd3().reservation_envelope_base64url,
+    admission_challenge_base64url: start.admissionChallengeBase64url } });
+  const ticket = await requestCooperativeMemberSetOwnerTicket(hq, start, ready);
+  assert.equal(ticket.acpTicketBase64url, Buffer.alloc(32, 5).toString('base64url'));
+  assert.deepEqual(calls[1], { op: 'cooperative.owner-acp-ticket.v3', request: {
+    ready_envelope_sha256: ready } });
+  await assert.rejects(attachCooperative({ request: async () => ({ ...first,
+    member_set_assignment_envelope_sha256: sha('other') }) }, fd3(), start, assignment),
+  /differs from the signed cooperative assignment/);
+  await assert.rejects(requestCooperativeMemberSetOwnerTicket({ request: async () => ({
+    schema: 'hq/cooperative-owner-acp-ticket/v3', reservation_sha256: start.reservationSha256,
+    start_id: start.startId, launch_id: start.launchId,
+    ready_envelope_sha256: sha('wrong Ready'),
+    acp_ticket_base64url: Buffer.alloc(32, 5).toString('base64url'),
+  }) }, start, ready), /differs from the verified two-member Ready/);
 });

@@ -139,8 +139,10 @@ async function main([cmd, ...rest]) {
     let acp;
     try {
       if (cooperativeStartFd !== undefined) {
-        if (!soul.cooperativeAcp) throw new Error('verified cooperative ACP ticket is unavailable');
-        acp = await connectCooperativeAcp(soul.cooperativeAcp);
+        const ticket = soul.prepareCooperativeMemberSet
+          ? await soul.prepareCooperativeMemberSet() : soul.cooperativeAcp;
+        if (!ticket) throw new Error('verified cooperative ACP ticket is unavailable');
+        acp = await connectCooperativeAcp(ticket);
       }
       const frontDoor = cmd === 'run' ? serveAcp : chat;
       const serving = frontDoor({ soul, input: acp ?? process.stdin, output: acp ?? process.stdout })

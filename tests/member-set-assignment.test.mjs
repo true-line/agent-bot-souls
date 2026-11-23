@@ -262,4 +262,67 @@ test('prestarted attach requires the signed child, B policy and aggregate Ready 
   assert.throws(() => verifyMemberSetAttach(result, start, assignment,
     { admitted_runtimes: runtimes }, machinePin, Date.parse('2026-11-23T18:00:19Z')),
   /expired|stale|signed member or endpoint/);
+
+  const cooperativeEndpoint = { directory: '/fixture/member',
+    socket_path: '/fixture/member/one.sock', owner_uid: 331, group_gid: 332,
+    dir_mode: 0o2750, socket_mode: 0o660, expected_peer_uid: 332,
+    parent_device: '11', parent_inode: '12', parent_birthtime_ns: '13' };
+  const cooperativeRelay = { ...cooperativeEndpoint, directory: '/fixture/relay',
+    socket_path: '/fixture/relay/one.sock', owner_uid: 332, group_gid: 331,
+    expected_peer_uid: 331, parent_device: '21', parent_inode: '22' };
+  const cooperativeBridge = { ...payload.bridge, endpoints: {
+    broker: { directory: '/fixture/broker', socket_path: '/fixture/broker/one.sock',
+      owner_uid: 309, group_gid: 332, dir_mode: 0o2750, socket_mode: 0o660,
+      expected_peer_uid: 332 },
+    member: cooperativeEndpoint, relay: cooperativeRelay } };
+  const cooperativePayload = { ...payload, profile_in_force: 'managed-cooperative',
+    b_authority: { purpose: 'agent-bot/soul-cooperative-bridge-assignment/v3',
+      envelope_sha256: reservation }, bridge: cooperativeBridge };
+  const cooperativeAssignment = verify(cooperativePayload, { expected: {
+    ...expected, profile_in_force: 'managed-cooperative', bridge_uid: 332,
+    bridge_gid: 332, member_endpoint: cooperativeEndpoint,
+    relay_endpoint: cooperativeRelay } });
+  const cooperativeIdentity = { ...identity, profile_in_force: 'managed-cooperative' };
+  const cooperativeMap = { ...map, ...cooperativeIdentity,
+    assignment_envelope_sha256: cooperativeAssignment.envelopeSha256 };
+  const cooperativeChild = { ...child, ...cooperativeIdentity,
+    assignment_envelope_sha256: cooperativeAssignment.envelopeSha256,
+    provisional_hq_mapping: cooperativeMap,
+    provisional_hq_mapping_sha256: hash(jcs(cooperativeMap)) };
+  const cooperativeChildBytes = authority('agent-bot/stage2a-member-set-child-observation/v1',
+    cooperativeChild);
+  const cooperativePolicy = { ...policy, ...cooperativeIdentity,
+    member_set_assignment_envelope_sha256: cooperativeAssignment.envelopeSha256,
+    b_authority: cooperativePayload.b_authority, bridge: cooperativeBridge };
+  const cooperativePolicyBytes = authority('agent-bot/stage2a-b-member-authority/v1',
+    cooperativePolicy);
+  const cooperativeRows = readyRows.map((row) => {
+    const bridge_arm = { ...row.bridge_arm,
+      child_observation_envelope_sha256: hash(cooperativeChildBytes) };
+    return { ...row, bridge_arm, bridge_arm_receipt_sha256: hash(jcs(bridge_arm)) };
+  });
+  const cooperativeReady = { ...ready, ...cooperativeIdentity,
+    assignment_envelope_sha256: cooperativeAssignment.envelopeSha256,
+    child_observation_envelope_sha256: hash(cooperativeChildBytes),
+    member_b_authority_envelope_sha256: hash(cooperativePolicyBytes),
+    provisional_hq_mapping_sha256: hash(jcs(cooperativeMap)),
+    members: cooperativeRows };
+  const cooperativeReadyBytes = authority('agent-bot/stage2a-member-set-ready/v1',
+    cooperativeReady);
+  const cooperativeResult = { ...result, member_socket: cooperativeEndpoint.socket_path,
+    member_endpoint: cooperativeEndpoint,
+    child_observation_envelope_base64url: cooperativeChildBytes.toString('base64url'),
+    child_observation_envelope_sha256: hash(cooperativeChildBytes),
+    member_b_authority_envelope_base64url: cooperativePolicyBytes.toString('base64url'),
+    member_b_authority_envelope_sha256: hash(cooperativePolicyBytes),
+    ready_envelope_base64url: cooperativeReadyBytes.toString('base64url'),
+    ready_envelope_sha256: hash(cooperativeReadyBytes) };
+  const cooperativeStart = { ...start, adapterTransport: 'brokered-b',
+    memberEndpoint: cooperativeEndpoint, memberSocket: cooperativeEndpoint.socket_path };
+  assert.equal(verifyMemberSetAttach(cooperativeResult, cooperativeStart,
+    cooperativeAssignment, { admitted_runtimes: runtimes }, machinePin, at)
+    .ready.members.length, 2);
+  assert.throws(() => verifyMemberSetAttach({ ...cooperativeResult, member_endpoint: {
+    ...cooperativeEndpoint, parent_inode: '99' } }, cooperativeStart, cooperativeAssignment,
+  { admitted_runtimes: runtimes }, machinePin, at), /signed member or endpoint/);
 });
