@@ -32,7 +32,8 @@ const sortedKeys = (_, value) => value && typeof value === 'object' && !Array.is
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]]))
   : value;
 const recordDigest = (purpose, records) => `sha256:${hash(`${purpose}\0${JSON.stringify(records, sortedKeys)}`)}`;
-const launchDigest = (records) => recordDigest('agent-bot/stage2a-launch-inputs/v1', records);
+const launchDigest = (records) => recordDigest(records.effective_config?.profile === 'managed-cooperative'
+  ? 'agent-bot/stage2a-cooperative-launch-inputs/v3' : 'agent-bot/stage2a-launch-inputs/v1', records);
 
 function record(path, file) {
   const stat = fs.statSync(file);
@@ -153,8 +154,9 @@ test('preflight measures the full definition and Reconstructible trees independe
   assert.deepEqual(fs.readdirSync(hostProjectionRoot).sort(), PROJECTION.map(path => basename(path)));
 }));
 
-test('signed entry launch measures the fixed Souls Node invocation separately from member commands', (t) => withProjection(t, ({ root, launchInputRoot, stateRoot, makePlan, projectCommand }) => {
+test('signed entry launch measures the fixed Souls Node invocation separately from member commands', (t) => withProjection(t, ({ root, hostProjectionRoot, launchInputRoot, stateRoot, makePlan, projectCommand }) => {
   projectCommand([join(launchInputRoot, COMPONENTS.adapter)], {});
+  fs.writeFileSync(join(hostProjectionRoot, 'installation.json'), JSON.stringify({ installation_id: INSTALLATION, id: INSTALLATION }));
   const plan = makePlan();
   const node = join(launchInputRoot, 'bin', 'node');
   const entry = join(launchInputRoot, 'bin', 'agent-bot-souls.mjs');
@@ -180,6 +182,22 @@ test('signed entry launch measures the fixed Souls Node invocation separately fr
   const entryPlan = { ...plan, entryLaunch: true, admissionSocket, brokerSocket,
     launchInputRecords, launchInputMeasurement: launchDigest(launchInputRecords) };
   assert.equal(readProtectedSoulLayout(root, stateRoot, entryPlan).launchInputMeasurement, entryPlan.launchInputMeasurement);
+  const cooperativeRecords = {
+    ...launchInputRecords,
+    argv: [...launchInputRecords.argv.slice(0, -3), 'managed-cooperative', '--cooperative-start-fd', '3'],
+    component_digests: Object.fromEntries(Object.entries(launchInputRecords.component_digests)
+      .filter(([name]) => name !== 'bridge')),
+    effective_config: { ...launchInputRecords.effective_config, profile: 'managed-cooperative' },
+  };
+  const cooperativePlan = { ...entryPlan, launchInputRecords: cooperativeRecords,
+    launchInputMeasurement: launchDigest(cooperativeRecords) };
+  const definitionBefore = fs.readdirSync(join(root, 'Contents')).sort();
+  const stateBefore = fs.readdirSync(stateRoot);
+  assert.throws(() => readProtectedSoulLayout(root, stateRoot, cooperativePlan, 'managed-cooperative'),
+    /Frozen R runtime/);
+  assert.deepEqual(fs.readdirSync(join(root, 'Contents')).sort(), definitionBefore);
+  assert.deepEqual(fs.readdirSync(stateRoot), stateBefore);
+  assert.throws(() => readProtectedSoulLayout(root, stateRoot, cooperativePlan), /effective profile differs/);
   const wrongArgv = { ...launchInputRecords, argv: [...launchInputRecords.argv] };
   wrongArgv.argv[wrongArgv.argv.length - 1] = '4';
   assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...entryPlan,
@@ -408,7 +426,7 @@ test('launch measurement binds ordered argv, including argv[0], and environment 
     const component_digests = { ...base.component_digests };
     delete component_digests[scope];
     const incomplete = { ...base, component_digests };
-    assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...plan, launchInputRecords: incomplete, launchInputMeasurement: launchDigest(incomplete) }), /complete reviewed launch input object/);
+    assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...plan, launchInputRecords: incomplete, launchInputMeasurement: launchDigest(incomplete) }), /component digests differ from the selected profile/);
     const unmeasured = { ...base, component_digests: { ...base.component_digests, [scope]: `sha256:${hash('unmeasured fixture')}` } };
     assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...plan, launchInputRecords: unmeasured, launchInputMeasurement: launchDigest(unmeasured) }), new RegExp(`${scope} has no measured file`));
   }
@@ -420,6 +438,8 @@ test('launch measurement binds ordered argv, including argv[0], and environment 
 test('the cooperative replay changes the launch measurement while preserving the frozen definition', (t) => withProjection(t, ({ root, stateRoot, plan }) => {
   const replay = {
     ...plan.launchInputRecords,
+    component_digests: Object.fromEntries(Object.entries(plan.launchInputRecords.component_digests)
+      .filter(([name]) => name !== 'bridge')),
     effective_config: { ...plan.launchInputRecords.effective_config, profile: 'managed-cooperative' },
   };
   const replayPlan = { ...plan, launchInputRecords: replay, launchInputMeasurement: launchDigest(replay) };
@@ -427,6 +447,18 @@ test('the cooperative replay changes the launch measurement while preserving the
   const candidate = readProtectedSoulLayout(root, stateRoot, replayPlan, 'managed-cooperative');
   assert.equal(candidate.definitionMeasurement, plan.definitionMeasurement);
   assert.notEqual(candidate.launchInputMeasurement, plan.launchInputMeasurement);
+  const coreOnly = { ...replay, component_digests: Object.fromEntries(Object.entries(replay.component_digests)
+    .filter(([name]) => name !== 'harness' && name !== 'test_provider')) };
+  assert.equal(readProtectedSoulLayout(root, stateRoot, { ...replayPlan, launchInputRecords: coreOnly,
+    launchInputMeasurement: launchDigest(coreOnly) }, 'managed-cooperative').launchInputMeasurement, launchDigest(coreOnly));
+  const halfQualification = { ...replay, component_digests: { ...coreOnly.component_digests,
+    harness: replay.component_digests.harness } };
+  assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...replayPlan, launchInputRecords: halfQualification,
+    launchInputMeasurement: launchDigest(halfQualification) }, 'managed-cooperative'), /component digests differ/);
+  const bridgeClaim = { ...replay, component_digests: plan.launchInputRecords.component_digests };
+  assert.throws(() => readProtectedSoulLayout(root, stateRoot, { ...replayPlan,
+    launchInputRecords: bridgeClaim, launchInputMeasurement: launchDigest(bridgeClaim),
+  }, 'managed-cooperative'), /component digests differ from the selected profile/);
 }));
 
 test('runner state must be a disjoint private directory for the projected installation', (t) => withProjection(t, ({ root, scratch, stateRoot, ownerOverrides, plan }) => {
@@ -496,6 +528,10 @@ test('HQ-started protected requests cannot fall through to the cooperative packa
     code: 'profile_insufficient', reason: 'the HQ-started protected Soul has no separate runtime state directory',
   });
   await assert.rejects(startSoul({ requestedProfile: 'managed-protected', protectedStateRoot: '/untrusted', env: {} }), {
+    code: 'profile_insufficient', reason: 'the installed projection requires an HQ-started managed-protected launch',
+  });
+  await assert.rejects(startSoul({ requestedProfile: 'managed-cooperative', protectedStateRoot: '/untrusted',
+    protectedInputs: {}, env: HQ_ENV }), {
     code: 'profile_insufficient', reason: 'the installed projection requires an HQ-started managed-protected launch',
   });
   assert.throws(() => readProtectedSoulLayout('/installed', '../mutable'), (error) => error instanceof SoulError);
