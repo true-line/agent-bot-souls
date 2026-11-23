@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { checkMeasuredStockCliQualificationInput,
-  qualifiesStockCliQualificationInput } from '../lib/soul.mjs';
+  qualifiesStockCliQualificationInput, stockCliQualificationEnabled } from '../lib/soul.mjs';
 
 const path = 'runtime/bin/claude';
 const size = 354_630_016;
@@ -10,7 +10,10 @@ const entry = { path, stat: { isFile: () => true, size, mode: 0o100550 } };
 const record = { path, kind: 'regular', mode: '0550', size, sha256: digest };
 const measured = { ...record };
 
-test('the stock CLI size allowance is default-off and exact to path, bytes, mode and reviewed digest', () => {
+test('the approved stock CLI size allowance requires the two-member cooperative assignment', () => {
+  assert.equal(stockCliQualificationEnabled({ memberSetEnvelopeBytes: Buffer.from('signed assignment') }, 'managed-cooperative'), true);
+  assert.equal(stockCliQualificationEnabled({}, 'managed-cooperative'), false);
+  assert.equal(stockCliQualificationEnabled({ memberSetEnvelopeBytes: Buffer.from('signed assignment') }, 'managed-protected'), false);
   assert.equal(qualifiesStockCliQualificationInput(entry, record), false);
   assert.equal(qualifiesStockCliQualificationInput(entry, record, true), true);
   for (const changed of [
