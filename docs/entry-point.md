@@ -84,6 +84,34 @@ implement that operation, so this route fails closed. B-only token/proof
 handoff over the fixed inherited pipe, a race-resistant directory handoff,
 and physical cross-UID verification remain production gates.
 
+The cooperative FD3 preflight recognizes the signed `brokered-b` member and
+relay endpoint layout. It checks the R-visible bridge commitment and parent
+identities, then refuses before B attach or stock member launch. R cannot
+infer B readiness from the signed reservation alone. For brokered B, A must
+stage the signed primary without publishing the watched R request. HQ must
+verify B's live HMAC bind and relay peer/inode before A makes the one-use R
+request visible. The direct-Comms layout remains a separate
+cooperative route. Until that ordering and the exact H attach/readiness reply
+are released, the entry point gives no T21-positive brokered-B result.
+The publication order alone is an intent, not evidence that R was published.
+Machine's dispatcher must wait on the same already-open watched request inode
+for a separate A-signed publish outcome, then pass that outcome with FD3. R
+must verify the signature, canonical request digest, request inode identity,
+reservation and launch IDs, and expiry before attempting H attach. An absent,
+stale, or mismatched outcome leaves B closed, including after a crash between
+the request rename and outcome write.
+The brokered-B FD3 `/v2` projection adds the signed outcome envelope and the
+dispatcher-observed request identity to the R-visible member and relay paths.
+R reconstructs the canonical disk `/v1` request by dropping those four B-only
+fields and restoring the `/v1` schema. It checks the outcome's request digest
+and device, inode, and birthtime against that projection and Machine's observed
+identity. The B watched request is A-owned, runner-group `0640`; this exact
+mode belongs in the reviewed install plan. The direct request stays `0440`.
+R never reopens the watched request path to make this decision.
+The current H/Comms B ingress design covers the installed deterministic test
+provider: B checks the measured local Messages request before asking H for the
+one-use fixed response. It does not establish general vendor internet forwarding.
+
 `--profile managed-protected` requires the fixed Machine launcher, both
 assigned HQ sockets and `--protected-start-fd 3` on `run`. The inherited pipe
 carries a signed one-use Machine reservation, the complete launch-input
@@ -293,7 +321,7 @@ notice-consumer or MCP integration evidence.
 
 ## Contract validation
 
-The runtime consumes `soul-contracts` v0.9.0 through the commit and
+The runtime consumes `soul-contracts` v0.10.2 through the commit and
 `sha256-manifest-v1` digest in `governance/soul-contracts.json`. The explicit
 preparation step is documented in the [README](../README.md). Schemas and
 fixtures stay in that external dependency; none is copied into this

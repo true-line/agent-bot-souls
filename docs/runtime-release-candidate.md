@@ -12,7 +12,7 @@ passing physical gate.
    `souls-build-receipt.yml` with that commit as `approved_source_commit`, plus
    the SHA-256 and UTC observation time of the owner's fresh private R2 lock
    attestation. The workflow refuses a different SHA or unprotected ref. It
-   also refuses to build until Souls adopts the current v0.9.0 Contracts
+   also refuses to build until Souls adopts the current v0.10.2 Contracts
    release pin and matching reviewed HQ SDK pin.
 2. Approve the `qualification-release` environment for this exact run. The
    workflow tests the checked-out source, builds the npm archive and in-toto
@@ -62,3 +62,26 @@ public log proof, offline verification outcome, and selected source/digest into
 one release decision. Machine A and the designated physical host must then
 bind the chosen runtime digest into the signed install plan and independently
 prove T01–T03 and T21. No CI run or source fixture substitutes for that proof.
+
+For a brokered-B T21 candidate, preserve the A-signed primary and private B
+assignment, the exact owner-reviewed install receipt, and the ordering record:
+A stages the primary without exposing the watched R request; HQ verifies the
+live B HMAC bind and relay peer/inode; A then publishes that R request once.
+If B bind or relay verification fails, R remains unpublished. The current
+Souls B preflight refuses attach and stock member launch until the corresponding
+HQ reply and Machine producer exist. The signed `.tgz` build receipt proves
+runtime provenance, not this B-before-R ordering or physical T21.
+The A-signed order to publish R is only intent. Machine must persist a separate
+A-signed publish outcome on the exact watched request inode after the rename and
+sync, and its dispatcher must pass that outcome to R only after a bounded
+same-inode read. R independently verifies the outcome against its canonical
+request, reservation, host launch identity and expiry before H attach; a
+missing or changed outcome closes the B start. The exact B FD3 projection and
+outcome schema remain a cross-lane release dependency. The B projection is
+`cooperative-start/v2`: it carries R-visible member and relay paths, the
+signed outcome, and the dispatcher-observed request identity. The disk request
+is the common `/v1` object. Its B mode is A-owned, runner-group `0640`; direct
+mode retains `0440`. The installed plan must authorize that exact B mode.
+Machine's open-FD wait supplies the identity; R does not reopen the path.
+The current B ingress target is the measured local deterministic test provider;
+its fixture result does not establish general vendor internet forwarding.
