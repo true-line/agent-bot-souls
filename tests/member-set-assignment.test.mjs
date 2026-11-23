@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { canonicalize } from '../lib/contracts.mjs';
-import { verifyMemberSetAssignment } from '../lib/member-set-assignment.mjs';
+import { verifyMemberSetAdmission, verifyMemberSetAssignment, verifyMemberSetLaunch } from '../lib/member-set-assignment.mjs';
 
 const purpose = 'agent-bot/stage2a-member-set-assignment/v1';
 const hash = (value) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -102,4 +102,20 @@ test('member-set assignment refuses a signed payload from another private key', 
   const other = generateKeyPairSync('ed25519');
   assert.throws(() => verifyMemberSetAssignment({ envelopeBytes: envelope(payload, other.privateKey),
     machinePin, expected, frozen, now: Date.parse('2026-11-23T18:00:10Z') }), /signature is invalid/);
+});
+
+test('final Hello and each ACP attach must match the signed member row', () => {
+  const assignment = verify(payload);
+  verifyMemberSetAdmission(assignment, [{ member_id: 'm_spec' }, { member_id: 'm_lead' }]);
+  assert.throws(() => verifyMemberSetAdmission(assignment, [{ member_id: 'm_lead' }]), /exact signed two-member set/);
+  assert.throws(() => verifyMemberSetAdmission(assignment, [{ member_id: 'm_lead' }, { member_id: 'm_lead' }]), /exact signed two-member set/);
+  for (const member of members) {
+    assert.equal(verifyMemberSetLaunch(assignment, member.member_id, {
+      launch_id: member.launch_id, member_selector: member.member_selector }).member_id, member.member_id);
+    assert.throws(() => verifyMemberSetLaunch(assignment, member.member_id, {
+      launch_id: members[1 - members.indexOf(member)].launch_id,
+      member_selector: member.member_selector }), /launch ID or selector/);
+    assert.throws(() => verifyMemberSetLaunch(assignment, member.member_id, {
+      launch_id: member.launch_id, member_selector: 'mb_wrong' }), /launch ID or selector/);
+  }
 });
