@@ -309,7 +309,7 @@ test('prestarted attach requires the signed child, B policy and aggregate Ready 
     start_id: payload.start_id, launch_id: `ln_${'3'.repeat(24)}`,
     plan_id: payload.plan_id, plan_digest: payload.plan_digest,
     hq_epoch: payload.hq_epoch, grant_nonce: Buffer.alloc(32, 1).toString('base64url'),
-    launcher: { pid: 3901, uid: 331, gid: 331,
+    launcher: { pid: 3901, uid: 332, gid: 332,
       start_seconds: 1795456803, start_micros: 0 },
     bridge: { pid: 3902, uid: 332, gid: 332,
       start_seconds: 1795456804, start_micros: 0 },
@@ -387,6 +387,8 @@ test('prestarted attach requires the signed child, B policy and aggregate Ready 
   };
   assert.throws(() => verifyCooperative(signedChangedB({ installation_id: 'inst_other' })),
     /B observation differs/);
+  assert.throws(() => verifyCooperative(signedChangedB({ launcher: {
+    ...observedB.launcher, uid: 331, gid: 331 } })), /A-observed B process/);
   assert.throws(() => verifyCooperative(signedChangedB({ expires_at: '2026-11-23T18:00:10Z' })),
     /expired or stale|exceeds signed/);
   assert.throws(() => verifyCooperative(signedChangedB({ relay_socket_birthtime_ns: '24' })),
