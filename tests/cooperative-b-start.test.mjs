@@ -59,6 +59,7 @@ function publishOutcome(reservation, change = () => {}) {
   delete request.relay_socket_path;
   delete request.publish_outcome_envelope_base64url;
   delete request.request_identity;
+  delete request.member_set_assignment_envelope_base64url;
   request.schema = 'agent-bot-souls/cooperative-start/v1';
   const requestBytes = Buffer.from(canonicalize(request));
   const requestIdentity = { device: '12', inode: '345', birthtime_ns: '6789' };
@@ -133,6 +134,20 @@ test('Contracts #78 B reservation binds only R-visible member, relay and bridge 
   assert.equal(plan.bridgeLaunchSha256, payload.bridge_launch_sha256);
   assert.equal(plan.brokerSocket, undefined);
   assert.equal(payload.endpoints.member.expected_peer_uid, 333);
+});
+
+test('two-member cooperative fd 3 carries the assignment through the signed B handoff', () => {
+  const reservation = resigned(() => {});
+  reservation.value = { ...reservation.value,
+    schema: 'agent-bot-souls/cooperative-start/v3',
+    member_set_assignment_envelope_base64url: Buffer.from('assignment fixture bytes').toString('base64url') };
+  const valid = publishOutcome(reservation);
+  assert.equal(valid.start.memberSetEnvelopeBytes.toString(), 'assignment fixture bytes');
+  assert.equal(verifyCooperativeBPublishOutcome(valid.value, valid.start, reservation.pin, now)
+    .bridge_assignment_sha256, `sha256:${'c'.repeat(64)}`);
+  assert.throws(() => verifyCooperativeStart({ ...valid.value,
+    schema: 'agent-bot-souls/cooperative-start/v2' }, payload.assignment.package_root,
+  reservation.pin, now, identity), /invalid fd 3 input fields/);
 });
 
 test('B FD3 refuses altered endpoints, commitment and private bridge data', () => {

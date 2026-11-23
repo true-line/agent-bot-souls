@@ -118,6 +118,40 @@ test('signed handoff refuses altered records, wrong signer, stale start, wrong i
     reservation_sha256: digest(otherBytes) }, ROOT, pin, now), /live runner/);
 });
 
+test('two-member fd 3 keeps v3 reservation and assignment on the same pinned start', () => {
+  const { input, payload, now } = signedStart();
+  const v3Purpose = 'agent-bot/stage2a-reservation/v3';
+  const inventoryDigest = digest('R inventory');
+  const hDigest = digest('H descriptor');
+  const updated = {
+    ...payload, contract: 'machine/v3', schema_version: 3,
+    assignment: { ...payload.assignment, schema: 'agent-bot-machine/soul-start-assignment/v3',
+      bridge_account: '_abm-br-fixture', bridge_uid: process.getuid() + 1,
+      bridge_gid: process.getgid() + 1, broker: { socket_path: '/tmp/broker.sock' },
+      h_service_descriptor_digest: hDigest, r_inventory_digest: inventoryDigest },
+    measurement_binding: { ...payload.measurement_binding, contract: 'machine/v3',
+      schema_version: 3, h_service_descriptor_digest: hDigest,
+      r_inventory: { inventory_digest: inventoryDigest }, r_components: [] },
+  };
+  const payloadBytes = Buffer.from(canonicalize(updated));
+  const envelope = { schema_version: 3, purpose: v3Purpose,
+    issuer_public_key_base64url: b64(pin), payload_sha256: digest(payloadBytes),
+    payload_base64url: b64(payloadBytes),
+    signature_base64url: b64(sign(null, Buffer.concat([Buffer.from(v3Purpose + '\0'), payloadBytes]), privateKey)),
+  };
+  const envelopeBytes = Buffer.from(canonicalize(envelope));
+  const v3 = { ...input, schema: 'agent-bot-souls/protected-start/v2',
+    reservation_envelope_base64url: b64(envelopeBytes), reservation_sha256: digest(envelopeBytes),
+    member_set_assignment_envelope_base64url: b64('assignment fixture bytes') };
+  const start = verifyProtectedStart(v3, ROOT, pin, now);
+  assert.equal(start.bAuthoritySha256, v3.reservation_sha256);
+  assert.equal(start.memberSetBridge.uid, updated.assignment.bridge_uid);
+  assert.equal(start.memberSetEnvelopeBytes.toString(), 'assignment fixture bytes');
+  assert.throws(() => verifyProtectedStart({ ...v3, schema: 'agent-bot-souls/protected-start/v1' }, ROOT, pin, now), /invalid fd 3 input fields/);
+  assert.throws(() => verifyProtectedStart({ ...v3, member_set_assignment_envelope_base64url: '!' }, ROOT, pin, now), /noncanonical base64url/);
+  assert.throws(() => verifyProtectedStart({ ...v3, reservation_sha256: digest('wrong') }, ROOT, pin, now), /reservation envelope digest differs/);
+});
+
 test('run reads a bounded strict fd 3 pipe before touching ACP stdout', async () => {
   const pipeExec = [
     'import os, sys',
