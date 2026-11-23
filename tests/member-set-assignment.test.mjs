@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { canonicalize } from '../lib/contracts.mjs';
 import { verifyMemberSetAdmission, verifyMemberSetAssignment, verifyMemberSetLaunch } from '../lib/member-set-assignment.mjs';
+import { verifyMemberSetAttach } from '../lib/member-set-attach.mjs';
 
 const purpose = 'agent-bot/stage2a-member-set-assignment/v1';
 const hash = (value) => `sha256:${createHash('sha256').update(value).digest('hex')}`;
@@ -118,4 +119,147 @@ test('final Hello and each ACP attach must match the signed member row', () => {
     assert.throws(() => verifyMemberSetLaunch(assignment, member.member_id, {
       launch_id: member.launch_id, member_selector: 'mb_wrong' }), /launch ID or selector/);
   }
+});
+
+test('prestarted attach requires the signed child, B policy and aggregate Ready chain', () => {
+  const assignment = verify(payload);
+  const authority = (purposeName, value) => {
+    const bytes = jcs(value);
+    return jcs({ schema_version: 1, purpose: purposeName,
+      issuer_public_key_base64url: machinePin.toString('base64url'),
+      payload_sha256: hash(bytes), payload_base64url: bytes.toString('base64url'),
+      signature_base64url: sign(null, Buffer.concat([Buffer.from(purposeName + '\0'), bytes]),
+        pair.privateKey).toString('base64url') });
+  };
+  const identity = Object.fromEntries(['profile_in_force', 'host_id', 'installation_id',
+    'soul_id', 'start_id', 'hq_epoch'].map((field) => [field, payload[field]]));
+  const runtimes = members.map((member) => ({ member_id: member.member_id,
+    runtime_id: `runtime_${member.member_id}`, channel_binding: `binding_${member.member_id}` }));
+  const map = { contract: 'hq/v1', kind: 'stage2a-provisional-member-map', schema_version: 1,
+    ...identity, assignment_envelope_sha256: assignment.envelopeSha256,
+    runtime_state: 'provisional', acp_authority: 'withheld',
+    members: members.map((member, i) => ({ member_id: member.member_id,
+      member_selector: member.member_selector, runtime_id: runtimes[i].runtime_id,
+      channel_binding: runtimes[i].channel_binding })),
+    issued_at: '2026-11-23T18:00:03Z', expires_at: '2026-11-23T18:00:19Z' };
+  const observed = members.map((member, i) => ({ member_id: member.member_id,
+    launch_id: member.launch_id, member_selector: member.member_selector,
+    runtime_id: runtimes[i].runtime_id, grant_sha256: hash(`grant ${i}`),
+    launcher_process: { pid: 4001 + i, uid: 331, gid: 331,
+      start_seconds: 1795456803, start_micros: i },
+    child_process: { pid: 4101 + i, uid: 331, gid: 331, parent_pid: 4001 + i,
+      process_group_id: 4001 + i, start_seconds: 1795456804, start_micros: i,
+      executable_sha256: member.command_sha256 } }));
+  const child = { contract: 'machine/v3', kind: 'stage2a-member-set-child-observation',
+    schema_version: 1, ...identity, reservation_sha256: reservation,
+    assignment_envelope_sha256: assignment.envelopeSha256,
+    provisional_hq_mapping_sha256: hash(jcs(map)), provisional_hq_mapping: map,
+    members: observed, observed_at: '2026-11-23T18:00:04Z',
+    issued_at: '2026-11-23T18:00:05Z', expires_at: '2026-11-23T18:00:19Z' };
+  const childBytes = authority('agent-bot/stage2a-member-set-child-observation/v1', child);
+  const policy = { contract: 'machine/v3', kind: 'stage2a-b-member-authority',
+    schema_version: 1, ...identity, plan_id: payload.plan_id, plan_digest: payload.plan_digest,
+    reservation_sha256: reservation,
+    member_set_assignment_envelope_sha256: assignment.envelopeSha256,
+    owner_plan_member_set_sha256: payload.owner_plan_member_set_sha256,
+    b_authority: payload.b_authority, hq_uid: 309, runner_uid: 331, bridge: payload.bridge,
+    members: members.map((member) => ({ member_id: member.member_id,
+      launch_id: member.launch_id, member_selector: member.member_selector,
+      adjacent_cli_path: member.adjacent_cli_path,
+      adjacent_cli_sha256: member.adjacent_cli_sha256,
+      qualification: { model: 'fixture', request_sha256: hash('request'),
+        headers_sha256: hash('headers'), client_key_sha256: hash('key'),
+        http_host: 'fixture.invalid', messages_query: '', response_text: 'fixture response' } })),
+    issued_at: '2026-11-23T18:00:06Z', expires_at: '2026-11-23T18:00:19Z' };
+  const policyBytes = authority('agent-bot/stage2a-b-member-authority/v1', policy);
+  const readyRows = members.map((member, i) => {
+    const arm = { member_id: member.member_id, member_selector: member.member_selector,
+      runtime_id: runtimes[i].runtime_id,
+      child_observation_envelope_sha256: hash(childBytes), bridge_uid: payload.bridge.uid,
+      adapter_pid: observed[i].child_process.pid, adapter_uid: 331, adapter_gid: 331,
+      adapter_start_seconds: observed[i].child_process.start_seconds,
+      adapter_start_micros: observed[i].child_process.start_micros,
+      relay_peer_rule: 'a-attested-live-direct-child-of-adapter-v1',
+      relay_peer_state: 'unobserved', provider_ingress: 'withheld-pending-per-peer-attestation',
+      state: 'armed', armed_at: '2026-11-23T18:00:07Z' };
+    return { member_id: member.member_id, launch_id: member.launch_id,
+      member_selector: member.member_selector, runtime_id: runtimes[i].runtime_id,
+      bridge_arm: arm, bridge_arm_receipt_sha256: hash(jcs(arm)) };
+  });
+  const ready = { contract: 'machine/v3', kind: 'stage2a-member-set-ready',
+    schema_version: 1, ...identity, reservation_sha256: reservation,
+    assignment_envelope_sha256: assignment.envelopeSha256,
+    child_observation_envelope_sha256: hash(childBytes),
+    b_authority_sha256: payload.b_authority.envelope_sha256,
+    member_b_authority_envelope_sha256: hash(policyBytes),
+    provisional_hq_mapping_sha256: hash(jcs(map)),
+    bridge_process: { pid: 3901, uid: payload.bridge.uid, gid: payload.bridge.gid,
+      start_seconds: 1795456803, start_micros: 0, executable_sha256: hash('bridge') },
+    members: readyRows, observed_at: '2026-11-23T18:00:07Z',
+    issued_at: '2026-11-23T18:00:08Z', expires_at: '2026-11-23T18:00:18Z' };
+  const readyBytes = authority('agent-bot/stage2a-member-set-ready/v1', ready);
+  const memberEndpoint = { directory: '/fixture/member', owner_uid: 331, group_gid: 332,
+    dir_mode: 0o2750, socket_mode: 0o660, peer_uids: [331, 332] };
+  const start = { installationId: payload.installation_id, startId: payload.start_id,
+    reservationSha256: reservation, machinePin, runnerUid: 331, runnerGid: 331, hqUid: 309,
+    admissionSocket: '/fixture/admission.sock',
+    memberEndpoint: { member_socket: '/fixture/member/one.sock', member_endpoint: memberEndpoint },
+    launchInputRecords: { component_digests: { bridge: hash('bridge') } } };
+  const result = { version: 'stage2a-member-attach/v1',
+    installation_id: payload.installation_id, start_id: payload.start_id,
+    member_id: members[0].member_id, member_selector: members[0].member_selector,
+    runtime_id: runtimes[0].runtime_id, launch_id: members[0].launch_id,
+    attach: 'a'.repeat(64), expires_at: '2026-11-23T18:00:17Z', cwd: '/fixture/home',
+    member_socket: start.memberEndpoint.member_socket, member_endpoint: memberEndpoint,
+    member_bridge_token: 'b'.repeat(48), bridge_ready_nonce: 'c'.repeat(64),
+    runner_endpoint: { socketPath: start.admissionSocket, peerUid: 331,
+      directory: '/fixture' },
+    child_observation_envelope_base64url: childBytes.toString('base64url'),
+    child_observation_envelope_sha256: hash(childBytes),
+    member_b_authority_envelope_base64url: policyBytes.toString('base64url'),
+    member_b_authority_envelope_sha256: hash(policyBytes),
+    ready_envelope_base64url: readyBytes.toString('base64url'),
+    ready_envelope_sha256: hash(readyBytes) };
+  const at = Date.parse('2026-11-23T18:00:10Z');
+  const verifyAttach = (candidate = result) => verifyMemberSetAttach(candidate,
+    start, assignment, { admitted_runtimes: runtimes }, machinePin, at);
+  assert.equal(verifyAttach().ready.members.length, 2);
+  assert.throws(() => verifyAttach({ ...result, member_selector: members[1].member_selector }), /signed member or endpoint/);
+  const badLauncherBytes = authority('agent-bot/stage2a-member-set-child-observation/v1', {
+    ...child, members: [{ ...observed[0], launcher_process: {
+      ...observed[0].launcher_process, start_micros: 1000000 } }, observed[1]] });
+  const badReadyBytes = authority('agent-bot/stage2a-member-set-ready/v1', {
+    ...ready, child_observation_envelope_sha256: hash(badLauncherBytes),
+    members: readyRows.map((row) => {
+      const bridge_arm = { ...row.bridge_arm,
+        child_observation_envelope_sha256: hash(badLauncherBytes) };
+      return { ...row, bridge_arm, bridge_arm_receipt_sha256: hash(jcs(bridge_arm)) };
+    }),
+  });
+  assert.throws(() => verifyAttach({ ...result,
+    child_observation_envelope_base64url: badLauncherBytes.toString('base64url'),
+    child_observation_envelope_sha256: hash(badLauncherBytes),
+    ready_envelope_base64url: badReadyBytes.toString('base64url'),
+    ready_envelope_sha256: hash(badReadyBytes) }), /member child, B arm/);
+  assert.throws(() => verifyAttach({ ...result, ready_envelope_sha256: hash('other') }), /envelope digest differs/);
+  assert.throws(() => verifyAttach({ ...result, member_b_authority_envelope_sha256: hash('other') }), /envelope digest differs/);
+  const wrongHostBytes = authority('agent-bot/stage2a-member-set-ready/v1', {
+    ...ready, host_id: 'other-host' });
+  assert.throws(() => verifyAttach({ ...result,
+    ready_envelope_base64url: wrongHostBytes.toString('base64url'),
+    ready_envelope_sha256: hash(wrongHostBytes) }), /differs from the signed assignment/);
+  const wrongPolicy = JSON.parse(policyBytes.toString());
+  wrongPolicy.signature_base64url = Buffer.alloc(64).toString('base64url');
+  const wrongPolicyBytes = jcs(wrongPolicy);
+  assert.throws(() => verifyAttach({ ...result,
+    member_b_authority_envelope_base64url: wrongPolicyBytes.toString('base64url'),
+    member_b_authority_envelope_sha256: hash(wrongPolicyBytes) }), /Machine signature is invalid/);
+  const wrongReadyBytes = authority('agent-bot/stage2a-member-set-ready/v1', {
+    ...ready, member_b_authority_envelope_sha256: hash('other') });
+  assert.throws(() => verifyAttach({ ...result,
+    ready_envelope_base64url: wrongReadyBytes.toString('base64url'),
+    ready_envelope_sha256: hash(wrongReadyBytes) }), /evidence chain differs/);
+  assert.throws(() => verifyMemberSetAttach(result, start, assignment,
+    { admitted_runtimes: runtimes }, machinePin, Date.parse('2026-11-23T18:00:19Z')),
+  /expired|stale|signed member or endpoint/);
 });
