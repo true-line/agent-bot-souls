@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { canonicalize } from '../lib/contracts.mjs';
 import { attachCooperative, connectCooperativeAdmission, verifyCooperativeStart } from '../lib/cooperative-start.mjs';
-import { startSoul } from '../lib/entry-point.mjs';
+import { checkDirectCommsMemberLaunch, startSoul } from '../lib/entry-point.mjs';
 import { MACHINE_PIN } from '../lib/protected-start.mjs';
 
 const vector = JSON.parse(readFileSync(new URL('./fixtures/cooperative-start.synthetic.json', import.meta.url)));
@@ -108,6 +108,30 @@ test('Contracts #78 direct-Comms reservation is signature-verified and bound to 
   assert.equal(plan.launchInputMeasurement, payload.measurement_binding.launch_input_measurement);
   assert.equal(plan.rInventory.sidecar.sha256, payload.measurement_binding.r_inventory.sidecar.sha256);
   assert.equal(plan.expiresAt, payload.expires_at);
+});
+
+test('attached direct-Comms R may select only its signed broker and measured sole adapter', () => {
+  const plan = verifyCooperativeStart(wrapper(), root, pin, now, identity);
+  const args = {
+    verifiedStart: plan, cooperativeAttach: { acp_ticket_base64url: Buffer.alloc(32).toString('base64url') },
+    requestedProfile: 'managed-cooperative', admission: { profile: 'managed-cooperative' },
+    admissionPath: plan.admissionSocket, brokerPath: plan.brokerSocket,
+    adapter: { command: [join(plan.runtimeRoot, 'adapter/cli')], env: {} },
+    runnerUid: identity.uid, runnerGid: identity.gid,
+  };
+  assert.deepEqual(checkDirectCommsMemberLaunch(args), plan.launchInputRecords.environment);
+  for (const changed of [
+    { cooperativeAttach: undefined }, { requestedProfile: 'managed-protected' },
+    { admission: { profile: 'managed-protected' } }, { runnerUid: identity.uid + 1 },
+    { runnerGid: identity.gid + 1 }, { admissionPath: '/wrong/admission.sock' },
+    { brokerPath: '/wrong/broker.sock' },
+    { adapter: { command: ['/unmeasured/cli'], env: {} } },
+    { adapter: { command: args.adapter.command, env: { API_KEY: 'unsafe' } } },
+    { verifiedStart: { ...plan, adapterTransport: 'brokered-b' } },
+  ]) {
+    assert.throws(() => checkDirectCommsMemberLaunch({ ...args, ...changed }),
+      /signed direct-Comms member launch is unavailable/);
+  }
 });
 
 test('direct fd 3 refuses a signed B transport or a changed launch-record transport', () => {
