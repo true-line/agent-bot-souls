@@ -7,7 +7,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { canonicalize } from '../lib/contracts.mjs';
-import { attachCooperative, verifyCooperativeBMemberPath, verifyCooperativeBParents, verifyCooperativeBPublishOutcome, verifyCooperativeBRelaySocket, verifyCooperativeStart } from '../lib/cooperative-start.mjs';
+import { attachCooperative, requestCooperativeMemberSetOwnerTicket, verifyCooperativeBMemberPath, verifyCooperativeBParents, verifyCooperativeBPublishOutcome, verifyCooperativeBRelaySocket, verifyCooperativeStart } from '../lib/cooperative-start.mjs';
 import { MACHINE_PIN } from '../lib/protected-start.mjs';
 
 const vector = JSON.parse(readFileSync(new URL('./fixtures/cooperative-start-b.synthetic.json', import.meta.url)));
@@ -59,6 +59,7 @@ function publishOutcome(reservation, change = () => {}) {
   delete request.relay_socket_path;
   delete request.publish_outcome_envelope_base64url;
   delete request.request_identity;
+  delete request.member_set_assignment_envelope_base64url;
   request.schema = 'agent-bot-souls/cooperative-start/v1';
   const requestBytes = Buffer.from(canonicalize(request));
   const requestIdentity = { device: '12', inode: '345', birthtime_ns: '6789' };
@@ -66,7 +67,7 @@ function publishOutcome(reservation, change = () => {}) {
     contract: 'machine/v3', kind: 'soul-cooperative-publish-outcome', schema_version: 3,
     reservation_sha256: start.reservationSha256,
     bridge_assignment_sha256: `sha256:${'c'.repeat(64)}`,
-    order_sha256: `sha256:${'d'.repeat(64)}`,
+    order_sha256: sha(requestBytes),
     request_sha256: sha(requestBytes),
     request_device: requestIdentity.device, request_inode: requestIdentity.inode,
     request_birthtime_ns: requestIdentity.birthtime_ns,
@@ -117,6 +118,8 @@ test('B publication requires a separate pinned, signed outcome for the exact req
   assert.throws(() => verify(missingMode), /observed request and signed start/);
   const wrongMode = publishOutcome(reservation, (outcome) => { outcome.publication_mode = 'intent'; });
   assert.throws(() => verify(wrongMode), /observed request and signed start/);
+  const wrongOrder = publishOutcome(reservation, (outcome) => { outcome.order_sha256 = `sha256:${'d'.repeat(64)}`; });
+  assert.throws(() => verify(wrongOrder), /observed request and signed start/);
   const recovered = publishOutcome(reservation, (outcome) => { outcome.publication_mode = 'recovered'; });
   assert.throws(() => verify(recovered), /observed request and signed start/);
   const alteredEnvelope = Buffer.from(valid.value.publish_outcome_envelope_base64url, 'base64url');
@@ -133,6 +136,20 @@ test('Contracts #78 B reservation binds only R-visible member, relay and bridge 
   assert.equal(plan.bridgeLaunchSha256, payload.bridge_launch_sha256);
   assert.equal(plan.brokerSocket, undefined);
   assert.equal(payload.endpoints.member.expected_peer_uid, 333);
+});
+
+test('two-member cooperative fd 3 carries the assignment through the signed B handoff', () => {
+  const reservation = resigned(() => {});
+  reservation.value = { ...reservation.value,
+    schema: 'agent-bot-souls/cooperative-start/v3',
+    member_set_assignment_envelope_base64url: Buffer.from('assignment fixture bytes').toString('base64url') };
+  const valid = publishOutcome(reservation);
+  assert.equal(valid.start.memberSetEnvelopeBytes.toString(), 'assignment fixture bytes');
+  assert.equal(verifyCooperativeBPublishOutcome(valid.value, valid.start, reservation.pin, now)
+    .bridge_assignment_sha256, `sha256:${'c'.repeat(64)}`);
+  assert.throws(() => verifyCooperativeStart({ ...valid.value,
+    schema: 'agent-bot-souls/cooperative-start/v2' }, payload.assignment.package_root,
+  reservation.pin, now, identity), /invalid fd 3 input fields/);
 });
 
 test('B FD3 refuses altered endpoints, commitment and private bridge data', () => {
@@ -274,10 +291,53 @@ test('B CLI accepts only the assigned member and relay pair with FD3', () => {
   assert.match(incomplete.stderr, /one exact socket layout/);
 });
 
-test('B start cannot consume the direct C attach reply or expose a broker path', async () => {
+test('B start refuses the C attach before a verified member-set assignment', async () => {
   const start = verifyCooperativeStart(fd3(), payload.assignment.package_root, pin, now, identity);
   let requested = false;
   await assert.rejects(attachCooperative({ request: async () => { requested = true; } }, fd3(), start),
-    /B attach and live bridge bind are not available/);
+    /B attach requires the verified two-member assignment/);
   assert.equal(requested, false);
+});
+
+test('two-member B C attach withholds the owner ticket until the same signed Ready', async () => {
+  const start = verifyCooperativeStart(fd3(), payload.assignment.package_root, pin, now, identity);
+  const assignment = { envelopeSha256: sha('assignment'), payload: {
+    profile_in_force: 'managed-cooperative', bridge: { endpoints: {
+      broker: { socket_path: '/fixture/broker.sock' },
+    } },
+  } };
+  const authority = sha('B authority');
+  const ready = sha('aggregate Ready');
+  const first = { schema: 'hq/cooperative-member-set-attach/v3',
+    reservation_sha256: start.reservationSha256, start_id: start.startId,
+    launch_id: start.launchId, broker_socket_path: '/fixture/broker.sock',
+    member_set_assignment_envelope_sha256: assignment.envelopeSha256,
+    member_b_authority_envelope_sha256: authority };
+  const calls = [];
+  const hq = { request: async (op, request) => {
+    calls.push({ op, request });
+    return op === 'cooperative.attach.v3' ? first : {
+      schema: 'hq/cooperative-owner-acp-ticket/v3',
+      reservation_sha256: start.reservationSha256, start_id: start.startId,
+      launch_id: start.launchId, ready_envelope_sha256: ready,
+      acp_ticket_base64url: Buffer.alloc(32, 5).toString('base64url'),
+    };
+  } };
+  assert.deepEqual(await attachCooperative(hq, fd3(), start, assignment), first);
+  assert.deepEqual(calls[0], { op: 'cooperative.attach.v3', request: {
+    reservation_envelope_base64url: fd3().reservation_envelope_base64url,
+    admission_challenge_base64url: start.admissionChallengeBase64url } });
+  const ticket = await requestCooperativeMemberSetOwnerTicket(hq, start, ready);
+  assert.equal(ticket.acpTicketBase64url, Buffer.alloc(32, 5).toString('base64url'));
+  assert.deepEqual(calls[1], { op: 'cooperative.owner-acp-ticket.v3', request: {
+    ready_envelope_sha256: ready } });
+  await assert.rejects(attachCooperative({ request: async () => ({ ...first,
+    member_set_assignment_envelope_sha256: sha('other') }) }, fd3(), start, assignment),
+  /differs from the signed cooperative assignment/);
+  await assert.rejects(requestCooperativeMemberSetOwnerTicket({ request: async () => ({
+    schema: 'hq/cooperative-owner-acp-ticket/v3', reservation_sha256: start.reservationSha256,
+    start_id: start.startId, launch_id: start.launchId,
+    ready_envelope_sha256: sha('wrong Ready'),
+    acp_ticket_base64url: Buffer.alloc(32, 5).toString('base64url'),
+  }) }, start, ready), /differs from the verified two-member Ready/);
 });

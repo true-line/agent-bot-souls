@@ -44,6 +44,35 @@ test('legacy account endpoint keeps the broker beside its member socket', () => 
   assert.equal(memberEndpoint(launch).broker, '/tmp/harness/broker.sock');
 });
 
+test('cooperative B endpoint retains the signed parent identity and bridge peer', (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'scm-'));
+  const directory = join(realpathSync(root), 's');
+  try {
+    mkdirSync(directory);
+    chmodSync(directory, 0o2750);
+    const st = statSync(directory, { bigint: true });
+    if (Number(st.gid) === process.geteuid()) {
+      t.skip('the test account has no distinct directory group to model B');
+      return;
+    }
+    const member_socket = join(directory, 'm.sock');
+    const member_endpoint = {
+      directory, socket_path: member_socket, owner_uid: process.geteuid(),
+      group_gid: Number(st.gid), dir_mode: 0o2750, socket_mode: 0o660,
+      expected_peer_uid: Number(st.gid), parent_device: st.dev.toString(),
+      parent_inode: st.ino.toString(), parent_birthtime_ns: st.birthtimeNs.toString(),
+    };
+    const launch = { member_socket, member_endpoint };
+    assert.equal(memberEndpoint(launch).bridgeUid, Number(st.gid));
+    assert.deepEqual(memberEndpoint(launch).peerUids,
+      [process.geteuid(), Number(st.gid)]);
+    assert.throws(() => memberEndpoint({ ...launch, member_endpoint: {
+      ...member_endpoint, parent_inode: String(st.ino + 1n) } }), /parent changed/);
+    assert.throws(() => memberEndpoint({ ...launch, member_endpoint: {
+      ...member_endpoint, expected_peer_uid: process.geteuid() } }), /differs from signed/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test('the member peer helper reads kernel UID from the accepted stream', async () => {
   assert.equal(memberPeerSupported(), true);
   const root = mkdtempSync(join(tmpdir(), 'soul-peer-'));

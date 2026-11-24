@@ -74,20 +74,26 @@ test('launch attach preserves adapter bytes that share the HQ reply read', async
   const dir = mkdtempSync(join(tmpdir(), 'launch-attach-'));
   const path = join(dir, 'admission.sock');
   const launchId = `ln_${'a1'.repeat(12)}`;
+  const operations = [];
   const server = createServer((socket) => {
     readLines(socket, (line) => {
       const request = JSON.parse(line);
+      operations.push(request.op);
       socket.write(`${JSON.stringify({ id: request.id, ok: true, result: { launch_id: launchId } })}\n${JSON.stringify({ jsonrpc: '2.0', id: 7, result: { ready: true } })}\n`);
     });
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(path, resolve); });
   t.after(async () => { await new Promise((resolve) => server.close(resolve)); rmSync(dir, { recursive: true, force: true }); });
 
-  const stream = await attachHq(path, { launch_id: launchId, attach: 'b2'.repeat(32) });
-  const line = new Promise((resolve) => readLines(stream, resolve));
-  stream.resume();
-  assert.deepEqual(JSON.parse(await line), { jsonrpc: '2.0', id: 7, result: { ready: true } });
-  stream.destroy();
+  for (const operation of ['launch.attach', 'stage2a.member.attach']) {
+    const stream = await attachHq(path, { launch_id: launchId, attach: 'b2'.repeat(32) },
+      { operation });
+    const line = new Promise((resolve) => readLines(stream, resolve));
+    stream.resume();
+    assert.deepEqual(JSON.parse(await line), { jsonrpc: '2.0', id: 7, result: { ready: true } });
+    stream.destroy();
+  }
+  assert.deepEqual(operations, ['launch.attach', 'stage2a.member.attach']);
 });
 
 test('launch attach rejects malformed host and shared refusals as contract failures', async () => {
