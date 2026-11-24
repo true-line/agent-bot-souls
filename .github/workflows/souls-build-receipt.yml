@@ -78,6 +78,7 @@ jobs:
         run: |
           npm run prepare:contracts
           npm test
+          python3 -m unittest -v scripts/test_build_souls_r_derivative.py
           python3 -m unittest -v scripts/test_record_souls_private_handoff.py
           python3 -m unittest -v scripts/test_check_souls_receipt_shape.py
           python3 -m unittest -v scripts/test_verify_souls_build_candidate.py
@@ -112,6 +113,21 @@ jobs:
           "$RUNNER_TEMP/stage2a-r2-venv/bin/python" scripts/r2-private-assets.py put \
             --role souls-package --file "$PACKAGE" --sha256 "sha256:$PACKAGE_SHA256" \
             > "$BUILD_DIR/package-store-receipt.json"
+      - name: Store selected Machine R tar once and verify through separate reader
+        env:
+          BUILD_DIR: ${{ steps.build.outputs.directory }}
+          SELECTED_TAR: ${{ steps.build.outputs.selected_tar }}
+          SELECTED_TAR_SHA256: ${{ steps.build.outputs.selected_tar_sha256 }}
+          R2_STAGE_LOCK_ATTESTATION_SHA256: ${{ inputs.lock_attestation_sha256 }}
+          R2_STAGE_LOCK_ATTESTED_AT_UTC: ${{ inputs.lock_attested_at_utc }}
+          R2_STAGE_WRITE_ACCESS_KEY_ID: ${{ secrets.R2_STAGE_WRITE_ACCESS_KEY_ID }}
+          R2_STAGE_WRITE_SECRET_ACCESS_KEY: ${{ secrets.R2_STAGE_WRITE_SECRET_ACCESS_KEY }}
+          R2_STAGE_READ_ACCESS_KEY_ID: ${{ secrets.R2_STAGE_READ_ACCESS_KEY_ID }}
+          R2_STAGE_READ_SECRET_ACCESS_KEY: ${{ secrets.R2_STAGE_READ_SECRET_ACCESS_KEY }}
+        run: |
+          "$RUNNER_TEMP/stage2a-r2-venv/bin/python" scripts/r2-private-assets.py put \
+            --role souls-r-tar --file "$SELECTED_TAR" --sha256 "sha256:$SELECTED_TAR_SHA256" \
+            > "$BUILD_DIR/selected-tar-store-receipt.json"
       - name: Sign exact Statement with Actions OIDC
         env:
           BUILD_DIR: ${{ steps.build.outputs.directory }}
@@ -135,16 +151,18 @@ jobs:
           BUNDLE: ${{ steps.receipt.outputs.bundle }}
           BUNDLE_SHA256: ${{ steps.receipt.outputs.bundle_sha256 }}
           PACKAGE: ${{ steps.build.outputs.package }}
+          SELECTED_TAR: ${{ steps.build.outputs.selected_tar }}
         run: |
           python3 scripts/check-souls-receipt-shape.py \
             "$BUNDLE" \
             "$BUILD_DIR/build-inputs.json" \
-            "$PACKAGE"
+            "$SELECTED_TAR"
       - name: Verify the candidate signing identity and public log inclusion
         env:
           BUILD_DIR: ${{ steps.build.outputs.directory }}
           BUNDLE: ${{ steps.receipt.outputs.bundle }}
           PACKAGE: ${{ steps.build.outputs.package }}
+          SELECTED_TAR: ${{ steps.build.outputs.selected_tar }}
         run: |
           cosign verify-blob-attestation \
             --bundle "$BUNDLE" \
@@ -155,7 +173,7 @@ jobs:
             --certificate-github-workflow-repository "true-line/agent-bot-souls" \
             --certificate-github-workflow-ref "refs/heads/main" \
             --certificate-github-workflow-sha "$GITHUB_SHA" \
-            "$PACKAGE" \
+            "$SELECTED_TAR" \
             > "$BUILD_DIR/online-identity-check.txt"
       - name: Store signed receipt once and verify through separate reader
         env:
@@ -176,8 +194,9 @@ jobs:
         env:
           BUILD_DIR: ${{ steps.build.outputs.directory }}
           PACKAGE: ${{ steps.build.outputs.package }}
+          SELECTED_TAR: ${{ steps.build.outputs.selected_tar }}
           BUNDLE: ${{ steps.receipt.outputs.bundle }}
-        run: python3 scripts/record-souls-private-handoff.py "$BUILD_DIR" "$PACKAGE" "$BUNDLE"
+        run: python3 scripts/record-souls-private-handoff.py "$BUILD_DIR" "$PACKAGE" "$SELECTED_TAR" "$BUNDLE"
       - name: Mark private candidate only
         run: |
           echo "Private Souls runtime candidate staged. Final release still requires fresh post-upload lock attestation, independent private read-back, owner-pinned trusted root, offline signature/Rekor verification, and owner review." >> "$GITHUB_STEP_SUMMARY"

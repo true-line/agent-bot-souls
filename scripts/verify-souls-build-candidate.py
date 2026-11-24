@@ -9,6 +9,7 @@ import argparse
 import base64
 import binascii
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -89,7 +90,8 @@ def asset(record, role, path, suffix):
 
 def verify(args):
     for value in (args.trusted_root_sha256, args.cosign_sha256,
-                  args.builder_sha256, args.toolchain_sha256):
+                  args.builder_sha256, args.derivative_builder_sha256,
+                  args.toolchain_sha256):
         require(SHA.fullmatch(value) is not None, "invalid approved digest")
     require(COMMIT.fullmatch(args.source_commit) and COMMIT.fullmatch(args.source_tree),
             "invalid approved source identity")
@@ -99,9 +101,13 @@ def verify(args):
     require(root_sha == args.trusted_root_sha256, "trusted root differs from owner pin")
     require(cosign_sha == args.cosign_sha256, "Cosign differs from owner pin")
 
+    derivative_builder = Path(__file__).with_name("build-souls-r-derivative.py")
+    derivative_builder_sha, _ = digest_file(derivative_builder)
+    require(derivative_builder_sha == args.derivative_builder_sha256,
+            "derivative builder differs from owner pin")
     handoff = bounded_json(args.handoff)
     require(isinstance(handoff, dict) and
-            handoff.get("schema") == "souls-private-r2-handoff-v1" and
+            handoff.get("schema") == "souls-private-r2-handoff-v2" and
             handoff.get("source_repository") == REPO and
             handoff.get("source_commit") == args.source_commit and
             handoff.get("source_tree") == args.source_tree and
@@ -123,6 +129,8 @@ def verify(args):
             type(attempt) is int and attempt > 0, "invalid handoff run identity")
     archive_sha, archive_length = asset(handoff.get("runtime_npm_archive"),
                                         "souls-package", args.archive, ".tgz")
+    selected_sha, selected_length = asset(handoff.get("machine_r_selected_tar"),
+                                          "souls-r-tar", args.selected_tar, ".tar")
     bundle_sha, bundle_length = asset(handoff.get("souls_build_bundle"),
                                       "souls-build-bundle", args.bundle, ".sigstore.json")
 
@@ -146,25 +154,42 @@ def verify(args):
             {"_type", "subject", "predicateType", "predicate"} and
             statement["_type"] == "https://in-toto.io/Statement/v1" and
             statement["predicateType"] == PREDICATE, "wrong Statement type")
-    require(statement["subject"] == [{"name": args.archive.name,
-                                      "digest": {"sha256": archive_sha[7:]}}],
-            "signed subject differs from archive")
+    require(statement["subject"] == [{"name": args.selected_tar.name,
+                                      "digest": {"sha256": selected_sha[7:]}}],
+            "signed subject differs from selected R tar")
     predicate = statement["predicate"]
     require(isinstance(predicate, dict) and set(predicate) == {
         "source_repository", "source_commit", "source_tree", "builder_sha256",
-        "toolchain_sha256", "workflow", "run_id", "run_attempt"},
+        "derivative_builder_sha256", "source_npm_sha256",
+        "selected_manifest_sha256", "excluded_paths", "toolchain_sha256",
+        "workflow", "run_id", "run_attempt"},
         "invalid build predicate")
     require(predicate == {
         "source_repository": REPO, "source_commit": args.source_commit,
         "source_tree": args.source_tree, "builder_sha256": args.builder_sha256,
+        "derivative_builder_sha256": derivative_builder_sha,
+        "source_npm_sha256": archive_sha,
+        "selected_manifest_sha256": predicate["selected_manifest_sha256"],
+        "excluded_paths": predicate["excluded_paths"],
         "toolchain_sha256": args.toolchain_sha256, "workflow": WORKFLOW,
         "run_id": run_id, "run_attempt": attempt,
     }, "signed predicate differs from approved selectors")
     require(inputs == {"predicate_type": PREDICATE,
-                       "subject": {"name": args.archive.name,
-                                   "sha256": archive_sha[7:]},
+                       "subject": {"name": args.selected_tar.name,
+                                   "sha256": selected_sha[7:]},
                        "predicate": predicate},
             "handoff build inputs differ from signed Statement")
+    spec = importlib.util.spec_from_file_location("reviewed_souls_derivative", derivative_builder)
+    builder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(builder)
+    with tempfile.TemporaryDirectory(prefix="souls-derivative-check-") as directory:
+        rebuilt = Path(directory) / "selected.tar"
+        selection = builder.build(args.archive, rebuilt)
+        rebuilt_sha, _ = digest_file(rebuilt)
+    require(rebuilt_sha == selected_sha and
+            selection["selected_manifest_sha256"] == predicate["selected_manifest_sha256"] and
+            selection["excluded_paths"] == predicate["excluded_paths"],
+            "selected R tar differs from source npm archive")
     material = bundle["verificationMaterial"]
     require(isinstance(material, dict) and "certificate" in material and
             isinstance(material.get("tlogEntries"), list) and
@@ -183,7 +208,7 @@ def verify(args):
                    "--certificate-github-workflow-repository", REPO,
                    "--certificate-github-workflow-ref", "refs/heads/main",
                    "--certificate-github-workflow-sha", args.source_commit,
-                   str(args.archive)]
+                   str(args.selected_tar)]
         environment = {"PATH": "/usr/bin:/bin", "HOME": directory,
                        "XDG_CACHE_HOME": directory, "LANG": "C"}
         try:
@@ -200,8 +225,11 @@ def verify(args):
         "source_tree": args.source_tree, "workflow": WORKFLOW,
         "run_id": run_id, "run_attempt": attempt,
         "archive_sha256": archive_sha, "archive_byte_length": archive_length,
+        "selected_tar_sha256": selected_sha, "selected_tar_byte_length": selected_length,
         "bundle_sha256": bundle_sha, "bundle_byte_length": bundle_length,
         "builder_sha256": args.builder_sha256,
+        "derivative_builder_sha256": derivative_builder_sha,
+        "selected_manifest_sha256": predicate["selected_manifest_sha256"],
         "toolchain_sha256": args.toolchain_sha256,
         "trusted_root_sha256": root_sha, "cosign_sha256": cosign_sha,
         "certificate_identity": IDENTITY, "oidc_issuer": ISSUER,
@@ -213,10 +241,11 @@ def verify(args):
 
 def main():
     parser = argparse.ArgumentParser()
-    for name in ("archive", "bundle", "handoff", "trusted-root", "cosign", "out"):
+    for name in ("archive", "selected-tar", "bundle", "handoff", "trusted-root", "cosign", "out"):
         parser.add_argument("--" + name, required=True, type=Path)
     for name in ("trusted-root-sha256", "cosign-sha256", "source-commit",
-                 "source-tree", "builder-sha256", "toolchain-sha256"):
+                 "source-tree", "builder-sha256", "derivative-builder-sha256",
+                 "toolchain-sha256"):
         parser.add_argument("--" + name, required=True)
     args = parser.parse_args()
     try:

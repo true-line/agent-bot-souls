@@ -104,11 +104,24 @@ def main():
     package_sha256 = digest_file(archive)
     name = f"sha256-{package_sha256}.tgz"
     archive = archive.rename(out / name)
+    derivative_builder = ROOT / "scripts/build-souls-r-derivative.py"
+    temporary_tar = out / "souls-r-selected.tar"
+    selection = json.loads(run("python3", str(derivative_builder), str(archive), str(temporary_tar)))
+    selected_sha256 = digest_file(temporary_tar)
+    if selection["selected_tar_sha256"] != "sha256:" + selected_sha256 or \
+            selection["source_npm_sha256"] != "sha256:" + package_sha256:
+        raise ValueError("derivative builder returned inconsistent digests")
+    selected_name = f"sha256-{selected_sha256}.tar"
+    selected_tar = temporary_tar.rename(out / selected_name)
     predicate = {
         "source_repository": repo,
         "source_commit": source_commit,
         "source_tree": source_tree,
         "builder_sha256": "sha256:" + digest_file(Path(__file__)),
+        "derivative_builder_sha256": "sha256:" + digest_file(derivative_builder),
+        "source_npm_sha256": "sha256:" + package_sha256,
+        "selected_manifest_sha256": selection["selected_manifest_sha256"],
+        "excluded_paths": selection["excluded_paths"],
         "toolchain_sha256": "sha256:" + sha256(canonical(toolchain)),
         "workflow": WORKFLOW,
         "run_id": run_id,
@@ -117,20 +130,22 @@ def main():
     (out / "predicate.json").write_bytes(canonical(predicate) + b"\n")
     (out / "statement.json").write_bytes(canonical({
         "_type": "https://in-toto.io/Statement/v1",
-        "subject": [{"name": name, "digest": {"sha256": package_sha256}}],
+        "subject": [{"name": selected_name, "digest": {"sha256": selected_sha256}}],
         "predicateType": PREDICATE_TYPE,
         "predicate": predicate,
     }) + b"\n")
     (out / "toolchain.json").write_bytes(canonical(toolchain) + b"\n")
     (out / "build-inputs.json").write_bytes(canonical({
         "predicate_type": PREDICATE_TYPE,
-        "subject": {"name": name, "sha256": package_sha256},
+        "subject": {"name": selected_name, "sha256": selected_sha256},
         "predicate": predicate,
     }) + b"\n")
     with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as stream:
         stream.write(f"directory={out}\n")
         stream.write(f"package={archive}\n")
         stream.write(f"package_sha256={package_sha256}\n")
+        stream.write(f"selected_tar={selected_tar}\n")
+        stream.write(f"selected_tar_sha256={selected_sha256}\n")
 
 
 if __name__ == "__main__":

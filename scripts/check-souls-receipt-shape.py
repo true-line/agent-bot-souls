@@ -35,6 +35,7 @@ def main():
         "name": archive_path.name,
         "digest": {"sha256": hashlib.sha256(archive_path.read_bytes()).hexdigest()},
     }, "subject differs from actual archive bytes")
+    require(archive_path.suffix == ".tar", "signed subject must be Machine R tar")
     require(subject[0]["name"] == inputs["subject"]["name"], "subject name differs from build record")
     require(subject[0]["digest"]["sha256"] == inputs["subject"]["sha256"], "subject digest differs from build record")
     material = bundle.get("verificationMaterial", {})
@@ -44,7 +45,7 @@ def main():
     proof = entries[0].get("inclusionProof", {})
     require(proof.get("checkpoint"), "receipt lacks inclusion checkpoint")
     print(json.dumps({
-        "package_sha256": subject[0]["digest"]["sha256"],
+        "selected_tar_sha256": subject[0]["digest"]["sha256"],
         "bundle_sha256": hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
         "source_commit": inputs["predicate"]["source_commit"],
         "source_tree": inputs["predicate"]["source_tree"],

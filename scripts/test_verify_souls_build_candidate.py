@@ -9,6 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
+from scripts.test_build_souls_r_derivative import derivative, fixture_npm
 
 
 SCRIPT = Path(__file__).with_name("verify-souls-build-candidate.py")
@@ -26,9 +27,16 @@ class CandidateVerificationTests(unittest.TestCase):
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.archive_bytes = b"runtime archive fixture\n"
+        source = self.root / "source.tgz"
+        fixture_npm(source)
+        self.archive_bytes = source.read_bytes()
         self.archive = self.root / f"sha256-{sha(self.archive_bytes)[7:]}.tgz"
-        self.archive.write_bytes(self.archive_bytes)
+        source.rename(self.archive)
+        selected = self.root / "selected.tar"
+        selection = derivative.build(self.archive, selected)
+        self.selected_bytes = selected.read_bytes()
+        self.selected_tar = self.root / f"sha256-{sha(self.selected_bytes)[7:]}.tar"
+        selected.rename(self.selected_tar)
         self.trusted_root = self.root / "trusted-root.json"
         self.trusted_root.write_bytes(b'{"trusted":"fixture"}\n')
         self.cosign = self.root / "cosign"
@@ -45,14 +53,18 @@ class CandidateVerificationTests(unittest.TestCase):
         self.toolchain_sha256 = sha(candidate.canonical_json(self.toolchain))
         self.statement = {
             "_type": "https://in-toto.io/Statement/v1",
-            "subject": [{"name": self.archive.name,
-                         "digest": {"sha256": sha(self.archive_bytes)[7:]}}],
+            "subject": [{"name": self.selected_tar.name,
+                         "digest": {"sha256": sha(self.selected_bytes)[7:]}}],
             "predicateType": candidate.PREDICATE,
             "predicate": {
                 "source_repository": candidate.REPO,
                 "source_commit": self.source_commit,
                 "source_tree": self.source_tree,
                 "builder_sha256": self.builder_sha256,
+                "derivative_builder_sha256": sha(SCRIPT.with_name("build-souls-r-derivative.py").read_bytes()),
+                "source_npm_sha256": sha(self.archive_bytes),
+                "selected_manifest_sha256": selection["selected_manifest_sha256"],
+                "excluded_paths": selection["excluded_paths"],
                 "toolchain_sha256": self.toolchain_sha256,
                 "workflow": candidate.WORKFLOW,
                 "run_id": "12345",
@@ -67,7 +79,7 @@ class CandidateVerificationTests(unittest.TestCase):
                                      "tlogEntries": [{"inclusionProof": {"checkpoint": "synthetic"}}]},
         }
         self.handoff = {
-            "schema": "souls-private-r2-handoff-v1",
+            "schema": "souls-private-r2-handoff-v2",
             "source_repository": candidate.REPO,
             "source_commit": self.source_commit,
             "source_tree": self.source_tree,
@@ -75,24 +87,27 @@ class CandidateVerificationTests(unittest.TestCase):
             "run_id": "12345",
             "run_attempt": 1,
             "build_inputs": {"predicate_type": candidate.PREDICATE,
-                             "subject": {"name": self.archive.name,
-                                         "sha256": sha(self.archive_bytes)[7:]},
+                             "subject": {"name": self.selected_tar.name,
+                                         "sha256": sha(self.selected_bytes)[7:]},
                              "predicate": self.statement["predicate"]},
             "toolchain": self.toolchain,
             "toolchain_file_sha256": sha(candidate.canonical_json(self.toolchain) + b"\n"),
             "runtime_npm_archive": self.asset("souls-package", self.archive_bytes),
+            "machine_r_selected_tar": self.asset("souls-r-tar", self.selected_bytes),
             "souls_build_bundle": {},
         }
         self.handoff["build_inputs_file_sha256"] = sha(
             candidate.canonical_json(self.handoff["build_inputs"]) + b"\n")
         self.write_bundle()
         self.args = SimpleNamespace(
-            archive=self.archive, bundle=self.bundle_path, handoff=self.handoff_path,
+            archive=self.archive, selected_tar=self.selected_tar,
+            bundle=self.bundle_path, handoff=self.handoff_path,
             trusted_root=self.trusted_root, cosign=self.cosign,
             trusted_root_sha256=sha(self.trusted_root.read_bytes()),
             cosign_sha256=sha(self.cosign.read_bytes()),
             source_commit=self.source_commit, source_tree=self.source_tree,
             builder_sha256=self.builder_sha256,
+            derivative_builder_sha256=self.statement["predicate"]["derivative_builder_sha256"],
             toolchain_sha256=self.toolchain_sha256,
         )
 
@@ -125,8 +140,9 @@ class CandidateVerificationTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("--type") + 1], candidate.PREDICATE)
         self.assertEqual(argv[argv.index("--certificate-github-workflow-sha") + 1],
                          self.source_commit)
-        self.assertEqual(argv[-1], str(self.archive))
+        self.assertEqual(argv[-1], str(self.selected_tar))
         self.assertEqual(record["archive_sha256"], sha(self.archive_bytes))
+        self.assertEqual(record["selected_tar_sha256"], sha(self.selected_bytes))
         self.assertEqual(record["bundle_sha256"], sha(self.bundle_path.read_bytes()))
         self.assertFalse(record["release_certified"])
         self.assertFalse(record["physical_qualification"])
@@ -139,6 +155,28 @@ class CandidateVerificationTests(unittest.TestCase):
         self.archive.write_bytes(self.archive_bytes)
         self.args.source_commit = "c" * 40
         with self.assertRaisesRegex(ValueError, "handoff source differs"):
+            candidate.verify(self.args)
+
+    def test_altered_selected_tar_refuses(self):
+        self.selected_tar.write_bytes(self.selected_bytes + b"changed")
+        with self.assertRaisesRegex(ValueError, "asset bytes differ"):
+            candidate.verify(self.args)
+
+    def test_readdressed_altered_tar_still_fails_derivation(self):
+        changed = self.selected_bytes + b"changed"
+        self.selected_tar.unlink()
+        self.selected_tar = self.root / f"sha256-{sha(changed)[7:]}.tar"
+        self.selected_tar.write_bytes(changed)
+        self.args.selected_tar = self.selected_tar
+        self.handoff["machine_r_selected_tar"] = self.asset("souls-r-tar", changed)
+        self.statement["subject"] = [{"name": self.selected_tar.name,
+                                      "digest": {"sha256": sha(changed)[7:]}}]
+        self.handoff["build_inputs"]["subject"] = {
+            "name": self.selected_tar.name, "sha256": sha(changed)[7:]}
+        self.handoff["build_inputs_file_sha256"] = sha(
+            candidate.canonical_json(self.handoff["build_inputs"]) + b"\n")
+        self.write_bundle()
+        with self.assertRaisesRegex(ValueError, "selected R tar differs from source npm archive"):
             candidate.verify(self.args)
 
     def test_changed_signed_subject_and_trusted_root_refuse(self):

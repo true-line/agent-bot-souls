@@ -43,10 +43,13 @@ class HandoffTest(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         self.package_bytes = b"private-runtime-archive\n"
+        self.selected_bytes = b"selected-machine-r-tar\n"
         self.bundle_bytes = b'{"mediaType":"application/vnd.dev.sigstore.bundle.v0.3+json"}\n'
         self.package = self.root / f"sha256-{sha(self.package_bytes)}.tgz"
+        self.selected_tar = self.root / f"sha256-{sha(self.selected_bytes)}.tar"
         self.bundle = self.root / f"sha256-{sha(self.bundle_bytes)}.sigstore.json"
         self.package.write_bytes(self.package_bytes)
+        self.selected_tar.write_bytes(self.selected_bytes)
         self.bundle.write_bytes(self.bundle_bytes)
         self.env = {
             "GITHUB_REPOSITORY": handoff.REPOSITORY,
@@ -64,6 +67,7 @@ class HandoffTest(unittest.TestCase):
             "run_id": self.env["GITHUB_RUN_ID"],
             "run_attempt": 2,
             "builder_sha256": "sha256:" + "c" * 64,
+            "source_npm_sha256": "sha256:" + sha(self.package_bytes),
         }
         self.toolchain = {
             "node_version": "v26.13.1", "node_binary_sha256": "a" * 64,
@@ -73,9 +77,10 @@ class HandoffTest(unittest.TestCase):
         predicate["toolchain_sha256"] = "sha256:" + sha(handoff.canonical_json(self.toolchain))
         self.write("build-inputs.json", {"predicate_type": handoff.PREDICATE_TYPE,
             "predicate": predicate,
-            "subject": {"name": self.package.name, "sha256": sha(self.package_bytes)}})
+            "subject": {"name": self.selected_tar.name, "sha256": sha(self.selected_bytes)}})
         self.write("toolchain.json", self.toolchain)
         self.write("package-store-receipt.json", self.receipt("souls-package", self.package_bytes))
+        self.write("selected-tar-store-receipt.json", self.receipt("souls-r-tar", self.selected_bytes))
         self.write("bundle-store-receipt.json", self.receipt("souls-build-bundle", self.bundle_bytes))
 
     def write(self, name, value):
@@ -93,7 +98,7 @@ class HandoffTest(unittest.TestCase):
         }
 
     def collect(self):
-        return handoff.collect(self.root, self.package, self.bundle, self.env,
+        return handoff.collect(self.root, self.package, self.selected_tar, self.bundle, self.env,
                                git_identity=("a" * 40, "b" * 40))
 
     def test_records_exact_nonsecret_locator_and_build_identity(self):
@@ -106,6 +111,7 @@ class HandoffTest(unittest.TestCase):
         self.assertEqual(record["run_id"], "12345")
         self.assertEqual(record["run_attempt"], 2)
         self.assertEqual(record["runtime_npm_archive"]["byte_length"], len(self.package_bytes))
+        self.assertEqual(record["machine_r_selected_tar"]["sha256"], f"sha256:{sha(self.selected_bytes)}")
         self.assertEqual(record["souls_build_bundle"]["sha256"], f"sha256:{sha(self.bundle_bytes)}")
         self.assertEqual(record["toolchain"], self.toolchain)
         self.assertEqual(record["toolchain_file_sha256"],
@@ -116,7 +122,7 @@ class HandoffTest(unittest.TestCase):
             handoff.emit(record, summary, self.root / "private-handoff.json")
         self.assertEqual(json.loads((self.root / "private-handoff.json").read_text()), record)
         self.assertIn("qualification://stage2a/souls-build-bundle/", output.getvalue())
-        self.assertIn("souls-private-r2-handoff-v1", summary.read_text())
+        self.assertIn("souls-private-r2-handoff-v2", summary.read_text())
         self.assertNotIn("DO_NOT_LOG_ME", output.getvalue() + summary.read_text())
         self.assertNotIn("secret_access_key", output.getvalue() + summary.read_text())
 
@@ -160,7 +166,7 @@ class HandoffTest(unittest.TestCase):
 
     def test_checked_out_git_objects_must_match_build_claim(self):
         with self.assertRaisesRegex(ValueError, "checked-out Git objects"):
-            handoff.collect(self.root, self.package, self.bundle, self.env,
+            handoff.collect(self.root, self.package, self.selected_tar, self.bundle, self.env,
                             git_identity=("a" * 40, "c" * 40))
 
     def test_changed_toolchain_inventory_is_rejected(self):
