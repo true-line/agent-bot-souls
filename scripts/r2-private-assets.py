@@ -196,17 +196,35 @@ def prove_bucket_lock():
     # A failed PUT may have reached R2 even if its response was lost. Always
     # try to remove this unlocked probe key, including after a read or write
     # failure. The retained locked canary below is never part of cleanup.
+    failed_step = None
+    step = "create"
     try:
         probe_put(disposable, first, conditional=True)
+        step = "first read"
         probe_get(disposable, first)
+        step = "overwrite"
         probe_put(disposable, second, conditional=False)
+        step = "second read"
         probe_get(disposable, second)
+    except TransportError:
+        failed_step = step
     finally:
+        cleanup_failures = []
         try:
             probe_delete(disposable)
+        except TransportError:
+            cleanup_failures.append("delete")
+        try:
             probe_get(disposable, None)
         except TransportError:
-            raise TransportError("private scope-test cleanup failed; check for disposable residue") from None
+            cleanup_failures.append("absence read")
+        if cleanup_failures:
+            first = f"private scope-test {failed_step} failed; " if failed_step else ""
+            raise TransportError(
+                f"{first}private scope-test cleanup failed ({', '.join(cleanup_failures)}); "
+                "check for disposable residue") from None
+    if failed_step:
+        raise TransportError(f"private scope-test {failed_step} failed") from None
     probe_get(canary, None)
     probe_put(canary, first, conditional=True)
     probe_get(canary, first)
