@@ -215,13 +215,42 @@ class PrivateTransportTest(unittest.TestCase):
                     with self.assertRaisesRegex(transport.TransportError, "cleanup failed"):
                         transport.prove_bucket_lock()
                 else:
-                    with self.assertRaises(transport.TransportError):
+                    label = "first read failed" if failed_step == "read" else "overwrite failed"
+                    with self.assertRaisesRegex(transport.TransportError, label):
                         transport.prove_bucket_lock()
             self.assertIn(("delete", disposable), calls)
             self.assertNotIn(("delete", canary), calls)
             self.assertFalse(any(call[1] == canary for call in calls))
             if failed_step != "delete":
                 self.assertEqual(calls[-1], ("get", disposable, None))
+
+    def test_scope_probe_reports_first_failure_even_when_cleanup_fails(self):
+        nonce = "3" * 32
+        disposable = f"scope-test/{nonce}"
+        calls = []
+
+        def get(key, expected=None):
+            calls.append(("get", key, expected))
+
+        def put(key, data, conditional):
+            calls.append(("put", key, conditional))
+            raise transport.TransportError("private probe create or overwrite failed")
+
+        def delete(key):
+            calls.append(("delete", key))
+            raise transport.TransportError("private probe delete failed")
+
+        with patch.object(transport.secrets, "token_hex", return_value=nonce), \
+                patch.object(transport, "probe_get", side_effect=get), \
+                patch.object(transport, "probe_put", side_effect=put), \
+                patch.object(transport, "probe_delete", side_effect=delete):
+            with self.assertRaisesRegex(transport.TransportError,
+                                        r"create failed; private scope-test cleanup failed \(delete\)"):
+                transport.prove_bucket_lock()
+        self.assertEqual(calls, [("get", disposable, None),
+                                 ("put", disposable, True),
+                                 ("delete", disposable),
+                                 ("get", disposable, None)])
 
     def test_canary_receipt_is_private_and_does_not_use_release_gate(self):
         proof = {"key": "v1/canary/" + "1" * 32,
