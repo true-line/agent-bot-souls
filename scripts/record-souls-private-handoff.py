@@ -103,7 +103,7 @@ def git_source_identity():
     return tuple(output)
 
 
-def collect(build_dir, package_path, bundle_path, environ, git_identity=None):
+def collect(build_dir, package_path, selected_tar_path, bundle_path, environ, git_identity=None):
     require(environ.get("GITHUB_REPOSITORY") == REPOSITORY, "wrong source repository")
     require(environ.get("GITHUB_REF") == "refs/heads/main", "wrong source ref")
     require(environ.get("GITHUB_WORKFLOW_REF") == f"{REPOSITORY}/{WORKFLOW}@refs/heads/main",
@@ -149,16 +149,23 @@ def collect(build_dir, package_path, bundle_path, environ, git_identity=None):
 
     package = checked_asset("souls-package", package_path,
                             read_json(build_dir / "package-store-receipt.json"))
+    selected_tar = checked_asset("souls-r-tar", selected_tar_path,
+                                 read_json(build_dir / "selected-tar-store-receipt.json"))
     bundle = checked_asset("souls-build-bundle", bundle_path,
                            read_json(build_dir / "bundle-store-receipt.json"))
     require(package_path.name == f"sha256-{package['sha256'][7:]}.tgz",
             "runtime archive name differs from its digest")
+    require(selected_tar_path.name == f"sha256-{selected_tar['sha256'][7:]}.tar",
+            "selected R tar name differs from its digest")
     require(bundle_path.name == f"sha256-{bundle['sha256'][7:]}.sigstore.json",
             "bundle name differs from its digest")
-    require(inputs.get("subject") == {"name": package_path.name, "sha256": package["sha256"][7:]},
-            "build subject differs from runtime archive")
+    require(inputs.get("subject") == {"name": selected_tar_path.name,
+                                       "sha256": selected_tar["sha256"][7:]},
+            "build subject differs from selected R tar")
+    require(predicate.get("source_npm_sha256") == package["sha256"],
+            "build predicate differs from source npm archive")
     return {
-        "schema": "souls-private-r2-handoff-v1",
+        "schema": "souls-private-r2-handoff-v2",
         "source_repository": REPOSITORY,
         "source_commit": source_commit,
         "source_tree": source_tree,
@@ -170,6 +177,7 @@ def collect(build_dir, package_path, bundle_path, environ, git_identity=None):
         "toolchain": toolchain,
         "toolchain_file_sha256": toolchain_file_sha256,
         "runtime_npm_archive": package,
+        "machine_r_selected_tar": selected_tar,
         "souls_build_bundle": bundle,
         "scope": "private object locator only; independent signature, Rekor, lock and release review required",
     }
@@ -188,12 +196,12 @@ def emit(record, summary_path, output_path=None):
 
 
 def main():
-    if len(sys.argv) != 4:
-        raise ValueError("expected build directory, runtime archive and signed bundle")
+    if len(sys.argv) != 5:
+        raise ValueError("expected build directory, npm archive, selected R tar and signed bundle")
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY", "")
     require(summary_path, "GitHub job summary path is missing")
     build_dir = Path(sys.argv[1])
-    record = collect(build_dir, Path(sys.argv[2]), Path(sys.argv[3]), os.environ)
+    record = collect(build_dir, Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4]), os.environ)
     emit(record, summary_path, build_dir / "private-handoff.json")
 
 

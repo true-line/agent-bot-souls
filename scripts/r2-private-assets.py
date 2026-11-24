@@ -35,7 +35,7 @@ MIN_LOCK_SECONDS = 365 * 24 * 60 * 60
 MAX_ATTESTATION_AGE = timedelta(hours=1)
 ROLES = frozenset({
     "qualification", "policy-envelope", "protected-envelope",
-    "cooperative-envelope", "souls-package", "souls-build-bundle",
+    "cooperative-envelope", "souls-package", "souls-r-tar", "souls-build-bundle",
     "canary-receipt",
 })
 URI_PATTERN = re.compile(r"\Aqualification://stage2a/([a-z-]+)/([0-9a-f]{64})\Z")

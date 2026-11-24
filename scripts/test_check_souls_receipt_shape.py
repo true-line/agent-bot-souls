@@ -39,7 +39,7 @@ class ReceiptShapeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
-        self.archive = self.directory / f"sha256-{ARCHIVE_SHA256}.tgz"
+        self.archive = self.directory / f"sha256-{ARCHIVE_SHA256}.tar"
         self.archive.write_bytes(ARCHIVE)
         self.inputs = self.directory / "build-inputs.json"
         self.inputs.write_text(json.dumps({
@@ -48,6 +48,10 @@ class ReceiptShapeTests(unittest.TestCase):
             "subject": {"name": self.archive.name, "sha256": ARCHIVE_SHA256},
         }))
         self.bundle = json.loads(FIXTURE.read_text())
+        statement = json.loads(base64.b64decode(self.bundle["dsseEnvelope"]["payload"]))
+        statement["subject"][0]["name"] = self.archive.name
+        self.bundle["dsseEnvelope"]["payload"] = base64.b64encode(
+            json.dumps(statement, sort_keys=True, separators=(",", ":")).encode()).decode()
 
     def check(self):
         path = self.directory / "receipt.bundle.json"
@@ -63,7 +67,7 @@ class ReceiptShapeTests(unittest.TestCase):
         result, path = self.check()
         self.assertEqual(result.returncode, 0, result.stderr)
         evidence = json.loads(result.stdout)
-        self.assertEqual(evidence["package_sha256"], ARCHIVE_SHA256)
+        self.assertEqual(evidence["selected_tar_sha256"], ARCHIVE_SHA256)
         self.assertEqual(evidence["bundle_sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
         self.assertEqual(evidence["source_commit"], PREDICATE["source_commit"])
 
