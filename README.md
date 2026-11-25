@@ -29,6 +29,11 @@ shim installed, the same commands are `agent-bot souls run` and
 `agent-bot souls chat`
 ([platform PDR-0037](https://github.com/true-line/agent-bot-platform/blob/main/docs/04-decisions/PDR-0037-agent-bot-executables-are-daemon-plugins-behind-a-shim.md)).
 
+For a runner with separately provisioned endpoints, use both
+`--admission-socket PATH` and `--broker-socket PATH` instead of `--hq-home`.
+Both paths must be absolute and distinct. These paths do not authenticate the
+runner or establish protected-launch authority; protected starts remain refused.
+
 Node 20 or later, no npm dependencies. Unix sockets only, as HQ is today.
 
 Before the first run or test, prepare the pinned contract dependency from

@@ -2,10 +2,16 @@
   "schema_version": 1,
   "agent-bot-hq": {
     "repository": "https://github.com/true-line/agent-bot-hq",
-    "commit": "69505d72ba30dd6c8129397baadb3b0b3397fbbd"
+    "commit": "744a9d9b2eb6d6b956691cad65a5228ee429b269"
   },
   "agent-bot-comms": {
     "repository": "https://github.com/true-line/agent-bot-comms",
-    "commit": "dbee4d4477179605d613ddc9aa05284c9f4d6055"
+    "commit": "972fcbed06c8ff79bf60bd9129f5da54e22f5772"
+  },
+  "agent-bot-machine": {
+    "repository": "https://github.com/true-line/agent-bot-machine",
+    "commit": "1c76b56506ca90a39742d2523c8b541d372423b2",
+    "profile": "internal/members/darwin/harness-egress.sb",
+    "profile_sha256": "717fd0fa41cf25ac36cc786c357c60814d90e19ec47497614e3ca2adf65f8f86"
   }
 }

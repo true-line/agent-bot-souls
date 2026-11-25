@@ -4,15 +4,856 @@
 // commitment. Then the recovery ladder, with real member processes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { once } from 'node:events';
+import { chmodSync, chownSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { connect as netConnect, Server } from 'node:net';
+import { tmpdir } from 'node:os';
+import { join, relative } from 'node:path';
 import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
 import { connectHq } from '../lib/hq-client.mjs';
 import { handoffs, readNotes } from '../lib/notes.mjs';
-import { DIGEST, fake, makeSoul, schema, setup, SOUL, startHQ, validate } from './harness.mjs';
+import { accountHQ, DIGEST, fake, hqProxy, makeSoul, schema, setup, SOUL, startHQ, validate } from './harness.mjs';
 
 const recoveries = (t) => t.soul.events().filter((e) => e.event === 'recovery').map((e) => [e.member_id, e.failure, e.action]);
 const finals = (t, taskId) => t.receipts('task.commit').filter((r) => r.task_id === taskId && r.status === 'completed');
+
+test('explicit HQ endpoints connect without exposing HQ home', async () => {
+  const hq = await startHQ();
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, admissionSocket: join(hq.home, 'admission.sock'),
+      brokerSocket: join(hq.home, 'broker.sock'), renewEveryMs: 0 });
+    assert.match((await soul.prompt('use the explicit broker endpoint')).text, /No waiting directives and no open tasks/);
+  } finally {
+    await soul?.stop();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an aborted pending Hello closes admission before the Soul starts', { timeout: 5_000 }, async () => {
+  const root = makeSoul();
+  const dir = mkdtempSync(join(tmpdir(), 'souls-abort-hello-'));
+  const path = join(dir, 'admission.sock');
+  const server = new Server();
+  let received;
+  const hello = new Promise((resolve) => { received = resolve; });
+  server.on('connection', (socket) => socket.once('data', received));
+  await new Promise((resolve) => server.listen(path, resolve));
+  const abort = new AbortController();
+  try {
+    const starting = startSoul({ root, admissionSocket: path,
+      brokerSocket: join(dir, 'broker.sock'), signal: abort.signal, renewEveryMs: 0 });
+    await hello;
+    abort.abort(new Error('signed Live lease expired'));
+    await assert.rejects(starting, /signed Live lease expired/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(root, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('HQ endpoint selection refuses incomplete, ambiguous and invalid paths before connecting', async () => {
+  const root = makeSoul();
+  try {
+    for (const endpoints of [
+      { admissionSocket: '/a' }, { brokerSocket: '/b' },
+      { hqHome: '/hq', admissionSocket: '/a', brokerSocket: '/b' },
+      { admissionSocket: 'relative', brokerSocket: '/b' },
+      { admissionSocket: '/a', brokerSocket: '/a' },
+    ]) {
+      await assert.rejects(startSoul({ root, ...endpoints }), /provide distinct absolute admissionSocket and brokerSocket without hqHome/);
+    }
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test('relative HQ home remains usable', async () => {
+  const hq = await startHQ();
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: relative(process.cwd(), hq.home), renewEveryMs: 0 });
+    assert.match((await soul.prompt('use the relative HQ home')).text, /No waiting directives and no open tasks/);
+  } finally {
+    await soul?.stop();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an adapter needs a session ID before its member reports Ready or prompts', async (suite) => {
+  for (const [name, reply] of [['missing', {}], ['empty', { sessionId: '' }], ['wrong type', { sessionId: 7 }]]) {
+    await suite.test(name, async () => {
+      const isolated = accountHQ();
+      const spawn = isolated.options.launch.spawn;
+      isolated.options.launch.spawn = (file, args, options) => {
+        if (options.env?.AGENT_BOT_SOULS_MEMBER_ID === 'm_lead') {
+          const scenario = JSON.stringify({ newSessionReply: reply, once: true });
+          options = { ...options, env: { ...options.env, FAKE_ADAPTER_SCENARIO: scenario } };
+        }
+        return spawn(file, args, options);
+      };
+      const beforeRetry = [];
+      let t;
+      try {
+        const delay = async () => {
+          beforeRetry.push({
+            ready: t.receipts('hq.ready').length,
+            started: t.soul.events().filter((e) => e.event === 'member-started').length,
+          });
+        };
+        t = await setup({ hq: isolated.options, runtime: { delay } });
+        const task = await t.offer();
+        await t.soul.prompt('start the member session');
+        assert.deepEqual(beforeRetry, [{ ready: 0, started: 0 }]);
+        assert.deepEqual(recoveries(t), [['m_lead', 'crash', 'restart']]);
+        assert.deepEqual(t.soul.events().filter((e) => e.event === 'member-started').map((e) => e.launch), ['hq', 'hq']);
+        assert.equal(t.receipts('hq.ready').length, 2);
+        assert.equal(finals(t, task).length, 1);
+      } finally {
+        if (t) await t.done();
+        isolated.layout.remove();
+      }
+    });
+  }
+});
+
+test('row 16b: the Soul uses HQ launch, its account member sockets, and HQ stop end to end', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  let t;
+  let finished = false;
+  try {
+    t = await setup({ hq: isolated.options });
+    const taskId = await t.offer();
+    const result = await t.soul.prompt('work through the isolated harness accounts');
+    assert.match(result.text, new RegExp(`Completed ${taskId}`));
+    assert.deepEqual(t.soul.events().filter((e) => e.event === 'member-started').map((e) => [e.member_id, e.launch]).sort(), [['m_lead', 'hq'], ['m_spec', 'hq']]);
+    assert.deepEqual(t.receipts('hq.launch').map((r) => [r.member_id, r.account]).sort(), [['m_lead', 'hqm_a'], ['m_spec', 'hqm_b']]);
+    assert.deepEqual(t.receipts('hq.bind').map((r) => r.caller_account).sort(), ['hqm_a', 'hqm_b']);
+
+    const accountDir = join(isolated.layout.homes.hqm_b, '.agent-bot-hq', 'souls', SOUL, 'm_spec');
+    assert.ok(readdirSync(accountDir).some((name) => /^artifact_[0-9a-f]{12}\.txt$/.test(name)), 'the adapter wrote in HQ\'s returned account directory');
+    assert.equal(existsSync(join(t.contents, 'home', 'm_spec')), false, 'the cooperative home was not created');
+
+    const memberSockets = ['hqm_a', 'hqm_b'].flatMap((account) => readdirSync(join(isolated.layout.dir, account))
+      .filter((name) => name.startsWith('member-')).map((name) => join(isolated.layout.dir, account, name)));
+    assert.equal(memberSockets.length, 2);
+    assert.ok(memberSockets.every((path) => (statSync(path).mode & 0o777) === 0o660));
+    const intruder = await connectHq(memberSockets[0]);
+    await assert.rejects(intruder.request('hello', { token: 'wrong-member-token' }), (error) => error.code === 'souls.unknown_member');
+    await intruder.close();
+
+    await t.done();
+    finished = true;
+    assert.ok(memberSockets.every((path) => !existsSync(path)), 'member sockets are removed with their launches');
+    assert.deepEqual(t.receipts('hq.launch.exited').map((r) => [r.member_id, r.reason, r.contained]).sort(), [['m_lead', 'stopped', true], ['m_spec', 'stopped', true]]);
+  } finally {
+    if (t && !finished) await t.done();
+    isolated.layout.remove();
+  }
+});
+
+test('an external protected request refuses before HQ or package mutation', async () => {
+  const hq = await startHQ();
+  const ops = [];
+  const proxy = await hqProxy(hq, ({ op, reply }) => { ops.push(op); return reply; });
+  const root = makeSoul();
+  const events = [];
+  try {
+    await assert.rejects(startSoul({ root, hqHome: proxy.home, requestedProfile: 'managed-protected', env: {}, log: (event) => events.push(event) }), {
+      name: 'SoulUnavailable', code: 'profile_insufficient', reason: 'Machine-authenticated protected Soul launch inputs are unavailable',
+    });
+    assert.deepEqual(events, [{ event: 'profile-refused', code: 'profile_insufficient', source: 'local', requested_profile: 'managed-protected' }]);
+    assert.deepEqual(ops, []);
+    assert.equal(existsSync(join(root, 'Contents/host/members.sock')), false);
+    assert.equal(existsSync(join(root, 'Contents/host/installation.json')), false);
+  } finally {
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an initial HQ profile refusal retains the HQ error', async () => {
+  const hq = await startHQ();
+  const proxy = await hqProxy(hq, ({ op, reply }) => op === 'Hello' && reply.ok
+    ? { id: reply.id, ok: false, refusal: { error: 'profile_insufficient', explanation: 'requested profile unavailable', correlation_id: 'corr_profile' } }
+    : reply);
+  const root = makeSoul();
+  const events = [];
+  try {
+    await assert.rejects(startSoul({ root, hqHome: proxy.home, renewEveryMs: 0, log: (event) => events.push(event) }),
+      (error) => error.name === 'HqRefusal' && error.op === 'Hello' && error.code === 'profile_insufficient' && error.transport === false);
+    assert.deepEqual(events.find((event) => event.event === 'profile-refused'), { event: 'profile-refused', code: 'profile_insufficient', source: 'hq', requested_profile: 'managed-cooperative' });
+    assert.equal(existsSync(join(root, 'Contents/host/members.sock')), false);
+  } finally {
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const initiator of ['external', 'HQ']) test(`a cooperative Soul started by ${initiator} refuses a protected grant before Equip`, async () => {
+  const hq = await startHQ();
+  const ops = [];
+  const proxy = await hqProxy(hq, ({ op, reply }) => {
+    ops.push(op);
+    return op === 'Hello' && reply.ok ? { ...reply, result: { ...reply.result, profile: 'managed-protected', warnings: [] } } : reply;
+  });
+  const root = makeSoul();
+  const env = { ...process.env };
+  if (initiator === 'HQ') env.AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH = '1';
+  else delete env.AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH;
+  const events = [];
+  try {
+    await assert.rejects(startSoul({ root, hqHome: proxy.home, renewEveryMs: 0, env, log: (event) => events.push(event) }), {
+      code: 'profile_insufficient', reason: 'Machine-authenticated protected Soul launch inputs are unavailable',
+    });
+    assert.deepEqual(ops, ['Hello']);
+    assert.deepEqual(events, [{ event: 'profile-refused', code: 'profile_insufficient', source: 'local', requested_profile: 'managed-cooperative', granted_profile: 'managed-protected' }]);
+    assert.equal(existsSync(join(root, 'Contents/host/members.sock')), false);
+    assert.equal(existsSync(join(root, 'Contents/home/m_lead')), false);
+  } finally {
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+for (const refusal of ['protected grant', 'HQ refusal', 'HQ refusal with unconfirmed cleanup']) test(`a cooperative Soul fences members after ${refusal} on re-admission`, { timeout: 30_000 }, async () => {
+  const hqRefused = refusal !== 'protected grant';
+  const unconfirmed = refusal === 'HQ refusal with unconfirmed cleanup';
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let releasePromptReply;
+  let releaseChunk;
+  let markChunkHeld;
+  let holdUpdates = false;
+  const chunkHeld = new Promise((resolve) => { markChunkHeld = resolve; });
+  let markPromptReplyHeld;
+  const promptReplyHeld = new Promise((resolve) => { markPromptReplyHeld = resolve; });
+  let equips = 0;
+  const proxy = await hqProxy(hq, ({ op, reply, count }) => {
+    if (op === 'Equip') equips += 1;
+    if (op === 'Hello' && reply.ok && count > 1) {
+      if (hqRefused) return { id: reply.id, ok: false, refusal: { error: 'profile_insufficient', explanation: 'requested profile unavailable', correlation_id: 'corr_profile' } };
+      return { ...reply, result: { ...reply.result, profile: 'managed-protected', warnings: [] } };
+    }
+    if (op === 'launch.stop' && reply.ok && unconfirmed) return { ...reply, result: { ...reply.result, state: 'uncontained' } };
+    if (holdUpdates && reply.method === 'session/update') return new Promise((resolve) => {
+      releaseChunk = () => resolve(reply);
+      markChunkHeld();
+    });
+    if (op === 'session/prompt' && count === 2) return new Promise((resolve) => {
+      releasePromptReply = () => resolve(reply);
+      markPromptReplyHeld();
+    });
+    return reply;
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await soul.prompt('start the cooperative lead');
+    assert.equal(soul.status().profile, 'managed-cooperative');
+    assert.ok(soul.status().members.some((member) => member.running));
+    const initialEquips = equips;
+
+    holdUpdates = true;
+    const chunks = [];
+    const inFlight = assert.rejects(soul.prompt('this reply races the profile refusal', (chunk) => chunks.push(chunk)),
+      (error) => error instanceof SoulUnavailable && error.code === 'profile_insufficient');
+    await Promise.all([promptReplyHeld, chunkHeld]);
+    hq.clock.advance(60_001);
+    const renewal = soul.renew();
+    while (soul.status().state !== 'unavailable') await new Promise((resolve) => setImmediate(resolve));
+    const chunksAtFence = [...chunks];
+    releaseChunk();
+    releasePromptReply();
+    await assert.rejects(renewal, (error) => error.code === 'profile_insufficient' && (hqRefused ? error.name === 'HqRefusal' && error.op === 'Hello' : error instanceof SoulUnavailable && /Machine-authenticated/.test(error.reason)));
+    await inFlight;
+    assert.equal(equips, initialEquips, 'no runtime from the refused Hello was equipped');
+    assert.deepEqual(chunks, chunksAtFence, 'no chunks delivered after the profile fence');
+    const status = soul.status();
+    assert.deepEqual([status.state, status.profile, status.code], ['unavailable', undefined, 'profile_insufficient']);
+    const event = soul.events().find((row) => row.event === 'profile-refused');
+    assert.equal(event.code, 'profile_insufficient');
+    assert.equal(event.source, hqRefused ? 'hq' : 'local');
+    assert.ok(status.members.every((member) => !member.running && member.runtime_id === undefined));
+    await assert.rejects(soul.prompt('must stay fenced'), (error) => error instanceof SoulUnavailable && error.state === 'unavailable' && error.code === 'profile_insufficient' && /profile_insufficient/.test(error.message));
+    assert.throws(() => soul.release(), (error) => error instanceof SoulUnavailable && error.state === 'unavailable' && error.code === 'profile_insufficient');
+    assert.equal(soul.events().filter((event) => event.event === 'member-started').length, 1, 'no member restarted after the profile refusal');
+    if (unconfirmed) {
+      assert.match(soul.events().find((row) => row.event === 'member-stop-failed')?.error, /m_lead.*uncontained/);
+      await assert.rejects(soul.stop(), /m_lead.*uncontained/);
+    } else await soul.stop();
+    assert.equal(soul.status().state, 'stopped');
+    assert.equal(soul.status().code, undefined);
+  } finally {
+    await soul?.stop().catch(() => {});
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+for (const held of ['Hello grant', 'Hello refusal', 'Equip', 'Ready']) test(`shutdown fences a pending ${held} during re-admission`, { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let release;
+  let signalHeld;
+  const responseHeld = new Promise((resolve) => { signalHeld = resolve; });
+  const counts = { Hello: 0, Equip: 0, Ready: 0 };
+  const proxy = await hqProxy(hq, ({ op, reply }) => {
+    if (Object.hasOwn(counts, op)) counts[op] += 1;
+    const isHeld = (op === 'Hello' && counts.Hello === 2 && held.startsWith('Hello')) ||
+      (op === 'Equip' && counts.Equip === 3 && held === 'Equip') ||
+      (op === 'Ready' && counts.Ready === 2 && held === 'Ready');
+    if (!isHeld) return reply;
+    const output = held === 'Hello refusal' ? { id: reply.id, ok: false, refusal: {
+      error: 'profile_insufficient', explanation: 'protected profile unavailable', correlation_id: 'corr_profile',
+    } } : reply;
+    return new Promise((resolve) => { release = () => resolve(output); signalHeld(); });
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await soul.prompt('start the lead');
+    hq.clock.advance(60_001);
+    const renewal = assert.rejects(soul.renew(), (error) => error instanceof SoulUnavailable && error.state === 'stopped');
+    await responseHeld;
+    const before = { ...counts };
+    const admitted = soul.events().filter((event) => event.event === 'admitted').length;
+    const stopping = soul.stop();
+    assert.equal(soul.status().state, 'stopped');
+    release();
+    await renewal;
+    await stopping;
+    assert.deepEqual(counts, before, 'no later admission, Equip, or Ready request');
+    assert.equal(soul.events().filter((event) => event.event === 'admitted').length, admitted);
+    assert.equal(soul.events().some((event) => event.event === 'profile-refused'), false);
+    assert.equal(soul.status().state, 'stopped');
+    assert.ok(soul.status().members.every((member) => member.runtime_id === undefined));
+  } finally {
+    release?.();
+    await soul?.stop().catch(() => {});
+    await proxy.done(); await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+test('a held turn is canceled without delivering updates during shutdown', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let releaseReply;
+  let releaseChunk;
+  let signalReply;
+  let signalChunk;
+  let holding = false;
+  const replyHeld = new Promise((resolve) => { signalReply = resolve; });
+  const chunkHeld = new Promise((resolve) => { signalChunk = resolve; });
+  const proxy = await hqProxy(hq, ({ op, reply, count }) => {
+    if (holding && reply.method === 'session/update') return new Promise((resolve) => {
+      releaseChunk = () => resolve(reply); signalChunk();
+    });
+    if (op === 'session/prompt' && count === 2) return new Promise((resolve) => {
+      releaseReply = () => resolve(reply); signalReply();
+    });
+    return reply;
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await soul.prompt('start the lead');
+    holding = true;
+    const chunks = [];
+    const turn = assert.rejects(soul.prompt('a turn during shutdown', (chunk) => chunks.push(chunk)),
+      (error) => error instanceof SoulUnavailable && error.state === 'stopped');
+    await Promise.all([replyHeld, chunkHeld]);
+    const stopping = soul.stop();
+    assert.equal(soul.status().state, 'stopped');
+    const chunksAtStop = [...chunks];
+    releaseChunk();
+    releaseReply();
+    await turn;
+    await stopping;
+    assert.deepEqual(chunks, chunksAtStop, 'no updates delivered after shutdown began');
+    assert.equal(soul.status().code, undefined);
+  } finally {
+    releaseChunk?.(); releaseReply?.();
+    await soul?.stop().catch(() => {});
+    await proxy.done(); await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+for (const outcome of ['profile refusal', 'shutdown']) test(`a delayed member restart cannot re-admit after ${outcome}`, { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let helloCount = 0;
+  const proxy = await hqProxy(hq, ({ op, reply, count }) => {
+    if (op === 'Hello' && reply.ok) {
+      helloCount += 1;
+      if (helloCount > 1) return { ...reply, result: { ...reply.result, profile: 'managed-protected', warnings: [] } };
+    }
+    if (op === 'session/prompt' && count === 2) return { jsonrpc: '2.0', id: reply.id, error: { code: -32603, message: 'adapter disconnected', data: { closed: true } } };
+    return reply;
+  });
+  const root = makeSoul();
+  let releaseDelay;
+  let signalDelay;
+  const delayStarted = new Promise((resolve) => { signalDelay = resolve; });
+  const delay = () => new Promise((resolve) => { releaseDelay = resolve; signalDelay(); });
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0, delay });
+    await soul.prompt('start the lead');
+    const turn = assert.rejects(soul.prompt('wait for a restart'), (error) => error instanceof SoulUnavailable &&
+      (outcome === 'shutdown' ? error.state === 'stopped' : error.code === 'profile_insufficient'));
+    await delayStarted;
+    if (outcome === 'shutdown') await soul.stop();
+    else {
+      hq.clock.advance(60_001);
+      await assert.rejects(soul.renew(), (error) => error.code === 'profile_insufficient');
+    }
+    const expectedHellos = outcome === 'shutdown' ? 1 : 2;
+    assert.equal(helloCount, expectedHellos);
+    releaseDelay();
+    await turn;
+    assert.equal(helloCount, expectedHellos, 'delayed recovery must not issue another Hello');
+    assert.equal(soul.status().state, outcome === 'shutdown' ? 'stopped' : 'unavailable');
+    assert.ok(soul.status().members.every((member) => !member.running && (outcome === 'shutdown' || member.runtime_id === undefined)));
+  } finally {
+    releaseDelay?.();
+    await soul?.stop().catch(() => {});
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+test('unauthenticated member connections stay bounded and capacity is released on close', async () => {
+  const hq = await startHQ();
+  const root = makeSoul();
+  let soul;
+  const held = [];
+  const open = () => new Promise((resolve, reject) => {
+    const socket = netConnect(join(root, 'Contents/host/members.sock'));
+    socket.once('connect', () => resolve(socket));
+    socket.once('error', reject);
+  });
+  try {
+    soul = await startSoul({ root, hqHome: hq.home, renewEveryMs: 0 });
+    for (let i = 0; i < 16; i += 1) held.push(await open());
+    const overflow = await Promise.all(Array.from({ length: 64 }, async () => {
+      const socket = await open();
+      await new Promise((resolve) => socket.once('close', resolve));
+      return socket;
+    }));
+    assert.ok(overflow.every((socket) => socket.destroyed));
+
+    const released = held.map((socket) => new Promise((resolve) => socket.once('close', resolve)));
+    for (const socket of held) socket.destroy();
+    await Promise.all(released);
+    const accepted = await open();
+    const outcome = await Promise.race([
+      new Promise((resolve) => accepted.once('close', () => resolve('closed'))),
+      new Promise((resolve) => setTimeout(() => resolve('open'), 50)),
+    ]);
+    assert.equal(outcome, 'open', 'a released slot accepts another unauthenticated connection');
+    accepted.destroy();
+  } finally {
+    for (const socket of held) socket.destroy();
+    await soul?.stop().catch(() => {});
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an available HQ launch does not fall back locally when adapter environment cannot cross the boundary', async () => {
+  const isolated = accountHQ();
+  let t;
+  try {
+    t = await setup({
+      hq: isolated.options,
+      soul: { adapters: { 'fake-lead': fake(undefined, { env: { EXTRA_UNREVIEWED: 'x' } }), 'fake-specialist': fake() } },
+    });
+    await assert.rejects(t.soul.prompt('work'), /environment variables that HQ account launch cannot accept/);
+    assert.equal(t.soul.events().some((event) => event.event === 'member-launch-fallback' || event.event === 'member-started'), false);
+    assert.equal(t.receipts('hq.launch').length, 0, 'the reserved launch never attached or started');
+  } finally {
+    await t?.done();
+    isolated.layout.remove();
+  }
+});
+
+test('an attach-time account launch failure falls back locally only in the cooperative profile', async () => {
+  const isolated = accountHQ();
+  const spawn = isolated.options.launch.spawn;
+  let refused = false;
+  isolated.options.launch.spawn = (file, args, options) => {
+    if (!refused && args[1] === '-H') {
+      refused = true;
+      const error = new Error('injected sudo launch failure');
+      error.code = 'ENOENT';
+      throw error;
+    }
+    return spawn(file, args, options);
+  };
+  let t;
+  try {
+    t = await setup({ hq: isolated.options });
+    const result = await t.soul.prompt('use the authorized cooperative fallback');
+    assert.match(result.text, /No waiting directives and no open tasks/);
+    assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-launch-fallback').map((event) => event.member_id), ['m_lead']);
+    assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-started').map((event) => event.launch), ['local']);
+  } finally {
+    await t?.done();
+    isolated.layout.remove();
+  }
+});
+
+test('an isolated member endpoint withholds bridge bootstrap and refuses attach fallback', { timeout: 10000 }, async () => {
+  const isolated = accountHQ();
+  const memberRoot = realpathSync(mkdtempSync(join(tmpdir(), 'sm-')));
+  const directory = join(memberRoot, 'start');
+  mkdirSync(directory);
+  const hq = await startHQ(isolated.options);
+  chownSync(directory, process.geteuid(), process.getgid());
+  chmodSync(directory, 0o2750);
+  let runnerToken;
+  let releaseReady;
+  let readyObserved;
+  let attachCalled = false;
+  const readyPending = new Promise((resolve) => { readyObserved = resolve; });
+  const proxy = await hqProxy(hq, ({ op, request, reply }) => {
+    if (op !== 'launch' || !reply.ok) return reply;
+    runnerToken = request.payload.env.AGENT_BOT_SOULS_MEMBER_TOKEN;
+    const st = statSync(directory);
+    const runnerPath = join(proxy.home, 'admission.sock');
+    return { ...reply, result: {
+      ...reply.result,
+      member_socket: join(directory, 'member.sock'),
+      member_endpoint: { directory, owner_uid: st.uid, group_gid: st.gid, dir_mode: 0o2750, socket_mode: 0o660, peer_uids: [st.uid, st.uid + 1] },
+      member_bridge_token: 'cd'.repeat(24), bridge_ready_nonce: 'ef'.repeat(32),
+      runner_endpoint: { directory: proxy.home, socketPath: runnerPath, peerUid: process.geteuid(),
+        ownerUid: process.geteuid(), groupGid: process.getgid(), dirMode: 0o2750, socketMode: 0o660 },
+    } };
+  }, { interceptRequest: (request) => {
+    if (request.op === 'launch.attach') {
+      attachCalled = true;
+      return { id: request.id, ok: false, host_refusal: { code: 'host.launch_unavailable', explanation: 'attach is not ready' } };
+    }
+    if (request.op !== 'launch.bridge_ready') return undefined;
+    return new Promise((resolve) => {
+      releaseReady = () => resolve({ id: request.id, ok: false,
+        host_refusal: { code: 'host.launch_unavailable', explanation: 'bridge bind unavailable' } });
+      readyObserved();
+    });
+  } });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, admissionSocket: join(proxy.home, 'admission.sock'),
+      brokerSocket: join(proxy.home, 'broker.sock'), renewEveryMs: 0 });
+    const prompt = soul.prompt('do not spawn this adapter locally');
+    prompt.catch(() => {});
+    await readyPending;
+    const member = await connectHq(join(directory, 'member.sock'));
+    try {
+      await member.request('hello', { token: runnerToken });
+      await assert.rejects(member.request('runtime'), (error) => error.code === 'souls.unknown_member');
+    } finally { await member.close(); }
+    releaseReady();
+    await assert.rejects(prompt,
+      (error) => error.code === 'host.launch_unavailable');
+    assert.equal(attachCalled, false, 'the runner never asks HQ to start ACP without B bind');
+    assert.equal(soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+    assert.equal(existsSync(join(directory, 'member.sock')), false, 'the refused launch removes its member socket');
+    assert.equal(isolated.launch.calls.some((call) => call.file !== '/usr/bin/sudo'), false);
+  } finally {
+    releaseReady?.();
+    await soul?.stop();
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(memberRoot, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+test('a separate runner launch cannot omit its Machine-assigned member endpoint', async (suite) => {
+  for (const scenario of ['runner endpoint marker', 'HQ-started explicit endpoints']) await suite.test(scenario, async () => {
+    const isolated = accountHQ();
+    const hq = await startHQ(isolated.options);
+    const operations = [];
+    const proxy = await hqProxy(hq, ({ op, reply }) => {
+      operations.push(op);
+      if (op === 'launch' && reply.ok && scenario === 'runner endpoint marker') {
+        return { ...reply, result: { ...reply.result, runner_endpoint: { socketPath: join(proxy.home, 'admission.sock') } } };
+      }
+      return reply;
+    });
+    const root = makeSoul();
+    let soul;
+    try {
+      const separate = scenario === 'HQ-started explicit endpoints';
+      soul = await startSoul({ root, ...(separate
+        ? { admissionSocket: join(proxy.home, 'admission.sock'), brokerSocket: join(proxy.home, 'broker.sock'),
+          env: { ...process.env, AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH: '1' } }
+        : { hqHome: proxy.home }), renewEveryMs: 0 });
+      await assert.rejects(soul.prompt('refuse an incomplete R/B launch'), /Machine-assigned member endpoint/);
+      assert.equal(operations.filter((op) => op === 'launch.stop').length, 1, 'the reservation is stopped');
+      assert.equal(operations.includes('launch.attach'), false);
+      assert.equal(operations.includes('launch.bridge_ready'), false);
+      assert.equal(soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+      assert.equal(isolated.launch.calls.some((call) => call.args[1] === '-H'), false);
+    } finally {
+      await soul?.stop();
+      await proxy.done();
+      await hq.done();
+      rmSync(root, { recursive: true, force: true });
+      isolated.layout.remove();
+    }
+  });
+});
+
+test('HQ-started mode refuses cooperative local adapter fallback', async () => {
+  let t;
+  try {
+    t = await setup({ runtime: { env: { ...process.env, AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH: '1' } } });
+    await assert.rejects(t.soul.prompt('do not run an adapter in HQ account'),
+      (error) => error instanceof SoulUnavailable && error.code === 'host.launch_unavailable'
+        && /local fallback is disabled/.test(error.reason));
+    assert.equal(t.soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+    assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-launch-fallback-refused').map((event) => event.member_id), ['m_lead']);
+    assert.equal(t.receipts('hq.launch').length, 0);
+  } finally { await t?.done(); }
+});
+
+test('a request-time account launch refusal fails before starting a broken local fallback', async () => {
+  const isolated = accountHQ();
+  const spawn = isolated.options.launch.spawn;
+  isolated.options.launch.spawn = (file, args, options) => {
+    if (args[1] !== '-H' && args[2] === 'hqm_a') {
+      const error = new Error('injected readiness failure');
+      error.code = 'ENOENT';
+      throw error;
+    }
+    return spawn(file, args, options);
+  };
+  let t;
+  try {
+    t = await setup({ hq: isolated.options });
+    await assert.rejects(
+      t.soul.prompt('do not start an account-bound member on the shared broker'),
+      (error) => error instanceof SoulUnavailable && /account-bound member m_lead/.test(error.reason),
+    );
+    assert.equal(t.soul.status().state, 'unavailable');
+    assert.deepEqual(t.soul.events().filter((event) => event.event === 'member-launch-fallback-refused').map((event) => event.member_id), ['m_lead']);
+    assert.equal(t.soul.events().some((event) => ['member-launch-fallback', 'member-started'].includes(event.event)), false);
+    assert.ok(t.receipts('hq.bind.refused').some((receipt) => receipt.runtime_id === t.soul.status().members.find((member) => member.member_id === 'm_lead').runtime_id));
+  } finally {
+    await t?.done();
+    isolated.layout.remove();
+  }
+});
+
+test('a malformed launch result is stopped before a clean retry', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  const proxy = await hqProxy(hq, ({ op, reply, count }) => op === 'launch' && reply.ok && count === 1
+    ? { ...reply, result: { ...reply.result, cwd: 'not-absolute' } }
+    : reply);
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await assert.rejects(soul.prompt('first launch is malformed'), /absolute working directory/);
+    const result = await soul.prompt('second launch is clean');
+    assert.match(result.text, /No waiting directives and no open tasks/);
+    assert.deepEqual(soul.events().filter((event) => event.event === 'member-started').map((event) => event.launch), ['hq']);
+  } finally {
+    await soul?.stop().catch(() => {});
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+test('an unconfirmed reservation cleanup preserves the setup error and fences another launch', { timeout: 30_000 }, async () => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  const proxy = await hqProxy(hq, ({ op, reply }) => {
+    if (op === 'launch' && reply.ok) return { ...reply, result: { ...reply.result, cwd: 'not-absolute' } };
+    if (op === 'launch.stop' && reply.ok) return { ...reply, result: { ...reply.result, state: 'uncontained' } };
+    return reply;
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    await assert.rejects(soul.prompt('exercise malformed setup'), (error) => {
+      assert.ok(error instanceof AggregateError);
+      assert.match(error.errors[0].message, /absolute working directory/);
+      assert.match(error.errors[1].message, /m_lead.*uncontained/);
+      return true;
+    });
+    await assert.rejects(soul.prompt('try starting again'), /connection closed/);
+    assert.equal(isolated.launch.calls.some((call) => call.args[1] === '-H'), false);
+  } finally {
+    await soul?.stop();
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
+
+test('shutdown fences member startup and cleans up its reservation, attach, or ACP handshake', async (suite) => {
+  for (const scenario of ['launch', 'unanswered launch', 'launch.attach', 'initialize']) {
+    await suite.test(scenario, { timeout: 15_000 }, async (t) => {
+      const reservationLost = scenario === 'unanswered launch';
+      const stage = reservationLost ? 'launch' : scenario;
+      const isolated = accountHQ();
+      const hq = await startHQ(isolated.options);
+      let release;
+      let launch;
+      let reached;
+      const held = new Promise((resolve) => { reached = resolve; });
+      const stops = [];
+      const proxy = await hqProxy(hq, ({ op, reply }) => {
+        if (op === 'launch' && reply.ok) launch = reply.result;
+        if (op === 'launch.stop' && reply.ok) stops.push(reply.result);
+        if (op !== stage) return reply;
+        return new Promise((resolve) => {
+          release = () => resolve(reply);
+          reached();
+        });
+      });
+      const root = makeSoul();
+      let soul;
+      try {
+        soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+        const prompt = assert.rejects(soul.prompt('stop while starting a member'), /the entry point stopped/);
+        await held;
+
+        if (reservationLost) t.mock.timers.enable({ apis: ['setTimeout'] });
+        const stopping = soul.stop();
+        assert.equal(soul.stop(), stopping);
+        if (reservationLost) {
+          const refused = assert.rejects(stopping, /m_lead is unconfirmed after the shutdown deadline/);
+          await new Promise(setImmediate);
+          t.mock.timers.tick(30_000);
+          t.mock.timers.reset();
+          await refused;
+          await prompt;
+          assert.deepEqual(stops, []);
+          assert.equal(isolated.launch.calls.some((call) => call.args[1] === '-H'), false);
+          assert.equal(existsSync(launch.member_socket), false);
+          assert.equal(existsSync(join(root, 'Contents', 'host', 'members.sock')), false);
+          return;
+        }
+        if (stage === 'launch') {
+          // The reservation already exists at HQ, but its ID is still in
+          // the withheld reply. Shutdown must wait before confirming it.
+          const reachedNextTick = new Promise((resolve) => setImmediate(resolve, 'waiting'));
+          assert.equal(await Promise.race([stopping, reachedNextTick]), 'waiting');
+          release();
+        }
+        // For attach and initialize the reply remains withheld until after
+        // shutdown. Each transport must still be closed and the launch ended.
+        let timeout;
+        try {
+          const deadline = new Promise((_, reject) => {
+            timeout = setTimeout(() => reject(new Error(`shutdown waited for the ${stage} reply`)), 4000);
+          });
+          await Promise.race([stopping, deadline]);
+        } finally { clearTimeout(timeout); }
+        await prompt;
+        assert.deepEqual(stops, [{ launch_id: launch.launch_id, state: 'exited' }]);
+        assert.equal(existsSync(launch.member_socket), false);
+        const children = isolated.launch.calls.filter((call) => call.args[1] === '-H').map(({ child }) => child);
+        if (stage === 'launch') assert.equal(children.length, 0);
+        else {
+          assert.equal(children.length, 1);
+          await Promise.all(children.map((child) => child.exitCode !== null || child.signalCode !== null ? undefined : once(child, 'exit')));
+        }
+        assert.equal(soul.events().some((event) => event.event === 'member-started'), false);
+      } finally {
+        if (reservationLost) t.mock.timers.reset();
+        release?.();
+        await soul?.stop().catch(() => {});
+        await proxy.done();
+        await hq.done();
+        rmSync(root, { recursive: true, force: true });
+        isolated.layout.remove();
+      }
+    });
+  }
+});
+
+test('shutdown reports an unanswered stop and closes the other accepted launch', { timeout: 15_000 }, async (t) => {
+  const isolated = accountHQ();
+  const hq = await startHQ(isolated.options);
+  let release;
+  let held;
+  const waiting = new Promise((resolve) => { held = resolve; });
+  const stops = [];
+  const proxy = await hqProxy(hq, ({ op, reply }) => {
+    if (op !== 'launch.stop') return reply;
+    assert.equal(reply.result?.state, 'exited');
+    stops.push(reply.result.launch_id);
+    if (stops.length !== 1) return reply;
+    return new Promise((resolve) => {
+      release = () => resolve(reply);
+      held();
+    });
+  });
+  const root = makeSoul();
+  let soul;
+  try {
+    soul = await startSoul({ root, hqHome: proxy.home, renewEveryMs: 0 });
+    const owner = await hq.owner();
+    const offer = await owner.request('tasks.offer', {
+      operation_id: 'offer_stop_timeout', objective: 'Exercise shutdown', done_criteria: 'Both members started', accountable_soul: SOUL,
+    });
+    assert.equal(offer.ok, true);
+    assert.match((await soul.prompt('Work the waiting task.')).text, new RegExp(`Completed ${offer.result.task_id}`));
+    const launches = isolated.launch.calls.filter((call) => call.args[1] === '-H');
+    assert.equal(launches.length, 2);
+    assert.ok(launches.every(({ child }) => child.exitCode === null && child.signalCode === null));
+    const childExits = Promise.all(launches.map(({ child }) => once(child, 'exit')));
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const stopping = assert.rejects(soul.stop(), /m_lead is unconfirmed: stop reply timed out/);
+    await waiting;
+    t.mock.timers.tick(45_000);
+    t.mock.timers.reset();
+    await stopping;
+    await childExits;
+    assert.equal(stops.length, 2);
+    assert.ok(launches.every(({ options }) => !existsSync(options.env.AGENT_BOT_SOULS_SOCKET)));
+    assert.equal(existsSync(join(root, 'Contents', 'host', 'members.sock')), false);
+  } finally {
+    t.mock.timers.reset();
+    release?.();
+    await soul?.stop().catch(() => {});
+    await proxy.done();
+    await hq.done();
+    rmSync(root, { recursive: true, force: true });
+    isolated.layout.remove();
+  }
+});
 
 test('Stage 1 exit: one task completes with scoped proposals and one final commitment', async () => {
   const t = await setup();
@@ -56,7 +897,7 @@ test('Stage 1 exit: one task completes with scoped proposals and one final commi
     // Each member committed as its own bound runtime, over the broker.
     const runtimes = Object.fromEntries(status.members.map((m) => [m.member_id, m.runtime_id]));
     assert.ok(commits.every((r) => r.caller === `runtime:${runtimes[r.by]}`));
-    assert.deepEqual(t.receipts('hq.bind').map((r) => r.member_id).sort(), ['m_lead', 'm_spec']);
+    assert.deepEqual([...new Set(t.receipts('hq.bind').map((r) => r.member_id))].sort(), ['m_lead', 'm_spec']);
 
     // Role routing happened once, lead to specialist.
     assert.deepEqual(t.soul.events().filter((e) => e.event === 'routed').map((e) => [e.from, e.to, e.role, e.task_id]), [['m_lead', 'm_spec', 'specialist', taskId]]);
@@ -94,6 +935,25 @@ test('the member socket is private, and only a running member\'s token opens it'
   } finally { await t.done(); }
 });
 
+test('a failed bind leaves the path reported in use untouched', async (ctx) => {
+  const t = await setup();
+  try {
+    await t.soul.stop();
+    const path = join(realpathSync(t.root), 'Contents/host/members.sock');
+    const original = Server.prototype.listen;
+    const listener = ctx.mock.method(Server.prototype, 'listen', function (...args) {
+      if (args[0] !== path) return original.apply(this, args);
+      writeFileSync(path, 'occupied', { flag: 'wx' });
+      queueMicrotask(() => this.emit('error', Object.assign(new Error('address already in use'), { code: 'EADDRINUSE' })));
+      return this;
+    });
+    try {
+      await assert.rejects(startSoul({ root: t.root, hqHome: t.home, renewEveryMs: 0 }), { code: 'EADDRINUSE' });
+      assert.equal(readFileSync(path, 'utf8'), 'occupied');
+    } finally { listener.mock.restore(); }
+  } finally { await t.done(); }
+});
+
 test('a Soul runs under one entry point: a second is refused, and a stale socket file is replaced', async () => {
   const t = await setup();
   try {
@@ -105,7 +965,14 @@ test('a Soul runs under one entry point: a second is refused, and a stale socket
     assert.equal((await t.task(taskId)).task.status, 'completed');
 
     await t.soul.stop();
-    writeFileSync(join(t.contents, 'host/members.sock'), '');
+    const path = join(t.contents, 'host/members.sock');
+    writeFileSync(path, 'existing file');
+    await assert.rejects(startSoul({ root: t.root, hqHome: t.home, renewEveryMs: 0 }), /member socket path is occupied/);
+    assert.equal(readFileSync(path, 'utf8'), 'existing file');
+    rmSync(path);
+    // Exit without closing the listener, as when a previous entry point stopped abruptly.
+    execFileSync(process.execPath, ['-e', "require('node:net').createServer().listen(process.argv[1], () => process.exit(0))", path]);
+    assert.ok(statSync(path).isSocket());
     const again = await startSoul({ root: t.root, hqHome: t.home, renewEveryMs: 0 });
     try {
       assert.equal(again.status().state, 'ready');

@@ -1,6 +1,7 @@
 // Transport/provider integration, not notice-consumer or MCP acceptance:
 // the reviewed SDK port runs against real pinned HQ admission, broker and
-// durable store; a test-only kind handler isolates connection/replay effects.
+// durable store; private fixture kinds and an exact test-proxy rewrite isolate
+// connection/replay effects without replacing HQ-owned public notice kinds.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createConnection, createServer } from 'node:net';
@@ -38,14 +39,14 @@ async function world(t, { beforeBind, beforeQuery, reply } = {}) {
   const handler = definePlugin({
     name: 'query-transport-fixture', version: '0.1.0', hostApi: 1, requires: { 'hq-admission': '^0.1.0' }, services: ['store'],
     async init(ctx) {
-      for (const kind of ['notices.peek', 'notices.consume-one']) ctx.broker.registerKind({ kind, async consume(message, meta) {
-        state.received.push({ kind, message, runtime_id: meta.runtime_id });
-        if (beforeQuery) await beforeQuery({ kind, message, meta, state });
+      for (const publicKind of ['notices.peek', 'notices.consume-one']) ctx.broker.registerKind({ kind: `transport-fixture.${publicKind}`, async consume(message, meta) {
+        state.received.push({ kind: publicKind, message, runtime_id: meta.runtime_id });
+        if (beforeQuery) await beforeQuery({ kind: publicKind, message, meta, state });
         return ctx.deps['hq-admission'].withBoundRuntime(meta.runtime_id, async (rt) => {
           if (message.installation_epoch !== rt.epoch) fail('stale_epoch', 'test query epoch differs');
           if (message.lease_generation !== rt.lease_generation) fail('lease_expired', 'test query generation differs');
           let effect;
-          if (kind === 'notices.consume-one') effect = await ctx.services.store.tx((tx) => {
+          if (publicKind === 'notices.consume-one') effect = await ctx.services.store.tx((tx) => {
             const n = (tx.get('effects', 'count') ?? 0) + 1; tx.put('effects', 'count', n); return n;
           });
           return { installation_epoch: rt.epoch, lease_generation: rt.lease_generation, runtime_id: meta.runtime_id, ...(effect ? { effect } : {}) };
@@ -79,7 +80,13 @@ async function world(t, { beforeBind, beforeQuery, reply } = {}) {
     const server = createConnection(hq.hq.paths.broker);
     upstream.add(server); server.on('error', () => client.destroy()); server.on('close', () => { upstream.delete(server); client.destroy(); }); client.on('close', () => server.destroy());
     const pending = new Map();
-    readLines(client, (line) => { const request = JSON.parse(line); frames.push(request); pending.set(request.id, request); writeLine(server, request); });
+    readLines(client, (line) => {
+      const request = JSON.parse(line);
+      frames.push(request);
+      pending.set(request.id, request);
+      const op = ['notices.peek', 'notices.consume-one'].includes(request.op) ? `transport-fixture.${request.op}` : request.op;
+      writeLine(server, { ...request, op });
+    });
     readLines(server, (line) => {
       const result = JSON.parse(line); const request = pending.get(result.id); const kind = request?.op; pending.delete(result.id);
       const output = reply ? reply({ kind, result, request, state }) : result;

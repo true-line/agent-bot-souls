@@ -3,11 +3,13 @@
 // is a terminal chat. Both give one conversation, which is the lead's.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
 import { rpcPeer } from '../lib/jsonrpc.mjs';
-import { BIN, makeSoul, SOUL, startHQ } from './harness.mjs';
+import { BIN, fake, makeSoul, SOUL, startHQ } from './harness.mjs';
 
 async function world(soulOptions) {
   const t = await startHQ();
@@ -60,6 +62,111 @@ test('agent-bot-souls run is an ACP agent: initialize, a session, a prompt strea
   } finally { child.kill('SIGKILL'); await t.done(); }
 });
 
+test('ACP cancellation targets the named session and the lead can continue afterwards', { timeout: 15_000 }, async () => {
+  const adapter = `
+    import { rpcPeer, RpcError } from ${JSON.stringify(new URL('../lib/jsonrpc.mjs', import.meta.url).href)};
+    const sessionId = 'native_session';
+    let finish;
+    let cancellations = 0;
+    const peer = rpcPeer({ input: process.stdin, output: process.stdout, methods: {
+      initialize: async () => ({ protocolVersion: 1 }),
+      'session/new': async () => ({ sessionId }),
+      'session/cancel': async (params) => {
+        if (params.sessionId !== sessionId) return;
+        cancellations++;
+        finish?.();
+        finish = undefined;
+      },
+      'session/prompt': async (params) => {
+        const text = params.prompt.at(-1).text;
+        const say = (reply) => peer.notify('session/update', { sessionId, update: {
+          sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: reply },
+        } });
+        if (text.startsWith('hold')) {
+          await new Promise((resolve) => {
+            finish = text === 'hold until disconnect' ? () => process.exit(70) : resolve;
+            say('turn in progress');
+          });
+          if (text === 'hold with request cancelled') throw new RpcError(-32800, 'fixture acknowledged cancellation');
+          if (text === 'hold with provider failure') throw new RpcError(-32603, 'fixture provider failed');
+          return { stopReason: text === 'hold to completion' ? 'end_turn' : 'cancelled' };
+        }
+        if (text.startsWith('retained ')) say(text);
+        else if (text === 'continue' && cancellations === 1) say('continued in the same adapter session');
+        else if (text === 'recover after disconnect' && cancellations === 0) say('continued after adapter recovery');
+        else say('unexpected prompt or cancellation');
+        return { stopReason: 'end_turn' };
+      },
+    } });`;
+  const t = await world({ adapters: {
+    'fake-lead': { command: [process.execPath, '--input-type=module', '-e', adapter] },
+    'fake-specialist': fake(),
+  } });
+  const child = t.run('run');
+  const exited = once(child, 'exit');
+  try {
+    let entered;
+    const waitForActive = () => new Promise((resolve) => { entered = resolve; });
+    const updates = [];
+    const client = rpcPeer({ input: child.stdout, output: child.stdin, onNotify: (_method, params) => {
+      const text = params?.update?.content?.text;
+      updates.push([params.sessionId, text]);
+      if (text === 'turn in progress') entered();
+    } });
+    await client.request('initialize', { protocolVersion: 1 });
+    const createSession = () => client.request('session/new', { cwd: t.root, mcpServers: [] });
+    const { sessionId: first } = await createSession();
+    const { sessionId: second } = await createSession();
+    const prompt = (sessionId, text) => client.request('session/prompt', { sessionId, prompt: [{ type: 'text', text }] });
+    const cancel = (sessionId) => client.notify('session/cancel', { sessionId });
+    const active = waitForActive();
+    const lead = prompt(first, 'hold');
+    lead.catch(() => {}); // The fixture can fail before it releases the lead.
+    await active;
+    let timeout;
+    const deadline = new Promise((_, reject) => {
+      timeout = setTimeout(() => reject(new Error('queued cancellation waited for the lead')), 3000);
+    });
+    try {
+      for (let i = 0; i < 32; i++) {
+        const queued = prompt(second, 'queued prompt must not run');
+        cancel('unknown_session');
+        cancel(second);
+        assert.deepEqual(await Promise.race([queued, deadline]), { stopReason: 'cancelled' });
+      }
+    } finally { clearTimeout(timeout); }
+    const remaining = Promise.all([lead, prompt(second, 'retained first'), prompt(first, 'retained second')]);
+    cancel(first);
+    assert.deepEqual(await remaining, [{ stopReason: 'cancelled' }, { stopReason: 'end_turn' }, { stopReason: 'end_turn' }]);
+    assert.deepEqual(await prompt(first, 'continue'), { stopReason: 'end_turn' });
+    assert.deepEqual(updates, [[first, 'turn in progress'], [second, 'retained first'], [first, 'retained second'], [first, 'continued in the same adapter session']]);
+    for (const [text, stopReason] of [['hold with request cancelled', 'cancelled'], ['hold to completion', 'end_turn']]) {
+      const running = waitForActive();
+      const turn = prompt(first, text);
+      await running;
+      cancel(first);
+      assert.deepEqual(await turn, { stopReason });
+    }
+    const failing = waitForActive();
+    const refusal = assert.rejects(prompt(first, 'hold with provider failure'), { code: -32603, message: 'fixture provider failed' });
+    await failing;
+    cancel(first);
+    await refusal;
+    const admittedBeforeCrash = t.hq.core.receipts.filter((row) => row.kind === 'hq.admission').length;
+    const disconnecting = waitForActive();
+    const disconnected = assert.rejects(prompt(first, 'hold until disconnect'), { code: -32603, message: /connection closed/ });
+    await disconnecting;
+    cancel(first);
+    await disconnected;
+    assert.equal(t.hq.core.receipts.filter((row) => row.kind === 'hq.admission').length, admittedBeforeCrash, 'the cancelled turn was not retried');
+    assert.deepEqual(await prompt(first, 'recover after disconnect'), { stopReason: 'end_turn' });
+    assert.deepEqual(updates.at(-1), [first, 'continued after adapter recovery']);
+    assert.equal(t.hq.core.receipts.filter((row) => row.kind === 'hq.admission').length, admittedBeforeCrash + 1, 'the later turn readmitted the member');
+    child.stdin.end();
+    assert.deepEqual(await exited, [0, null]);
+  } finally { child.kill('SIGKILL'); await exited; await t.done(); }
+});
+
 test('an unavailable Soul answers the prompt with the reason and stopReason refusal', async () => {
   const t = await world({ lead: { fail: 'credential' } });
   const child = t.run('run');
@@ -89,6 +196,55 @@ test('agent-bot-souls chat is the same conversation in a terminal', async () => 
     assert.deepEqual([status.state, status.soul_id, status.profile], ['ready', SOUL, 'managed-cooperative']);
     assert.equal((await t.task(taskId)).status, 'completed');
   } finally { child.kill('SIGKILL'); await t.done(); }
+});
+
+for (const mode of ['run', 'chat']) test(`the ${mode} executable refuses a protected profile before startup`, async () => {
+  const t = await world();
+  try {
+    await assert.rejects(promisify(execFile)(process.execPath, [BIN, mode, '--soul', t.root, '--hq-home', t.home, '--profile', 'managed-protected'], { timeout: 5000 }), (error) => {
+      assert.equal(error.code, 1);
+      const lines = error.stderr.trim().split('\n');
+      const event = JSON.parse(lines[0]);
+      assert.deepEqual(event, { event: 'profile-refused', code: 'profile_insufficient', source: 'local', requested_profile: 'managed-protected' });
+      assert.match(lines[1], /agent-bot-souls: the Soul is unavailable: profile_insufficient: Machine-authenticated protected Soul launch inputs are unavailable/);
+      return true;
+    });
+    assert.equal(existsSync(join(t.root, 'Contents/host/installation.json')), false);
+  } finally { await t.done(); }
+});
+
+test('run and chat reject an option missing its value before HQ admission', async () => {
+  const t = await world();
+  const execute = promisify(execFile);
+  try {
+    for (const cmd of ['run', 'chat']) {
+      for (const [option, tail] of [
+        ['--profile', ['--profile']],
+        ['--hq-home', ['--hq-home']],
+        ['--soul', ['--soul', '--profile', 'managed-protected']],
+      ]) {
+        await assert.rejects(execute(process.execPath, [BIN, cmd, '--soul', t.root, '--hq-home', t.home, ...tail],
+          { timeout: 5000, env: { ...process.env, AGENT_BOT_HQ_HOME: t.home } }), (error) => {
+          assert.equal(error.code, 1);
+          assert.equal(error.stderr.trim(), `agent-bot-souls: ${option} requires a value`);
+          return true;
+        });
+      }
+    }
+    assert.equal(t.hq.core.receipts.some(receipt => receipt.kind === 'hq.admission'), false);
+  } finally { await t.done(); }
+});
+
+test('the executable rejects ambiguous or incomplete explicit HQ endpoints', async () => {
+  const execute = promisify(execFile);
+  for (const args of [
+    ['--admission-socket', '/a'],
+    ['--hq-home', '/hq', '--admission-socket', '/a', '--broker-socket', '/b'],
+    ['--admission-socket', '/a', '--broker-socket', '/b', '--broker-socket', '/c'],
+  ]) {
+    await assert.rejects(execute(process.execPath, [BIN, 'run', '--soul', '/unused', ...args]),
+      (error) => error.code === 1 && /provide distinct absolute|may only be supplied once/.test(error.stderr));
+  }
 });
 
 test('the executable reports its version and refuses what it does not know', () => {

@@ -13,9 +13,11 @@ and sections 3, 5, 7 and 9 of the
    for each admitted runtime, `Ready` when a member is up, and `Lease`
    renewals. HQ decides admission, the profile in force, the installation
    epoch and the lease generation.
-2. **Starts the members.** Each member's adapter runs as its own process, in
-   `Contents/home/<member>/`. The entry point drives it over the Agent
-   Client Protocol (ACP) on stdio, one turn at a time per member.
+2. **Starts the members.** The entry point first asks HQ to launch each
+   adapter in its harness account and drives the attached stream over the
+   Agent Client Protocol (ACP), one turn at a time per member. In the
+   cooperative profile only, an explicit `host.launch_unavailable` refusal
+   falls back to a local process in `Contents/home/<member>/`.
 3. **Gives the owner one conversation.** A prompt at the front door is one
    turn of the lead. The lead's reply is streamed back.
 4. **Routes by role.** The lead asks the entry point to hand a prompt to
@@ -39,18 +41,129 @@ sending the binding.
 
 In the cooperative profile the binding is still a bearer secret inside the
 Soul, so a member that reads another member's binding can speak for it. HQ
-reports `managed-cooperative` for that reason. Where the owner gives a member
-its own OS account, HQ gives that account its own broker endpoint and accepts
-the member's runtime from that endpoint alone. Whoever starts the member in
-that account names the endpoint in `AGENT_BOT_SOULS_BROKER`. The entry point
-does not start members in other accounts yet (plan row 16b).
+reports `managed-cooperative` for that reason. Where the owner configures a
+harness account, HQ launches the adapter there, gives it that account's own
+broker endpoint, and accepts the runtime from that endpoint alone (plan row
+16b). HQ's returned account-private directory is the ACP session directory.
+The entry point supplies only the member token; HQ derives the member ID,
+role and both socket paths from the admitted runtime and verified account.
+Adapter-defined environment variables are refused instead of silently dropped.
+
+The current pilot shares a host UID for HQ and the Soul entry point. A
+separate per-installation Soul-runner UID needs a per-start member directory
+provisioned for that runner, with only the assigned bridge principal's group
+allowed to connect. A separate R/B launch must carry the Machine-assigned
+`member_endpoint`; if it is missing, the entry point stops the reservation
+before binding a member socket or attaching ACP. The reply describes that
+directory without giving the runner the bridge's broker path. The entry
+point checks the directory owner, group, mode, canonical path and inode
+before and after binding the socket. It does
+not create the directory or treat the reply as a Machine start receipt.
+Machine must authenticate and provision the one-use account/path assignment.
+For this route the entry point checks each accepted member connection's
+kernel peer UID against the assigned runner and bridge UIDs before it
+reads the member token. The runner token can use ordinary member operations
+but cannot request the member socket `runtime` response; that requires the
+bridge UID and an HQ-minted bridge member token. In the separate-runner route
+the response omits the broker path and `channel_binding`. Current HQ Equip
+still places its older `channel_binding` in runner memory; HQ must make that
+binding non-authoritative at B's broker endpoint and mint a separate B-only
+broker proof. Denying a later socket operation does not provide that custody.
+
+The HQ-started runner receives the exact admission and broker endpoints through
+`--admission-socket` and `--broker-socket`. Both must be absolute and distinct;
+this route does not derive a broker path from HQ's home directory. An
+HQ-started runner also requires `AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH=1` to
+disable local adapter fallback; an isolated member endpoint always refuses it.
+After member socket bind it sends `launch.bridge_ready` with the exact launch
+ID, attach token and HQ nonce. It accepts only `{launch_id, bridge_ready:
+true}` before requesting `launch.attach`. HQ must answer only after it has
+verified a live B-only HMAC broker bind and Machine-attested start/endpoint
+identities, and must recheck those when attach starts ACP. Current HQ does not
+implement that operation, so this route fails closed. B-only token/proof
+handoff over the fixed inherited pipe, a race-resistant directory handoff,
+and physical cross-UID verification remain production gates.
+
+The cooperative FD3 preflight recognizes the signed `brokered-b` member and
+relay endpoint layout. It checks the R-visible bridge commitment and parent
+identities, then refuses before B attach or stock member launch. R cannot
+infer B readiness from the signed reservation alone. For brokered B, A must
+stage the signed primary without publishing the watched R request. HQ must
+verify B's live HMAC bind and relay peer/inode before A makes the one-use R
+request visible. The direct-Comms layout remains a separate
+cooperative route. Until that ordering and the exact H attach/readiness reply
+are released, the entry point gives no T21-positive brokered-B result.
+The publication order alone is an intent, not evidence that R was published.
+Machine's dispatcher must wait on the same already-open watched request inode
+for a separate A-signed publish outcome, then pass that outcome with FD3. R
+must verify the signature, canonical request digest, request inode identity,
+reservation and launch IDs, and expiry before attempting H attach. An absent,
+stale, or mismatched outcome leaves B closed, including after a crash between
+the request rename and outcome write.
+The brokered-B FD3 `/v2` projection adds the signed outcome envelope and the
+dispatcher-observed request identity to the R-visible member and relay paths.
+R reconstructs the canonical disk `/v1` request by dropping those four B-only
+fields and restoring the `/v1` schema. It checks the outcome's request digest
+and device, inode, and birthtime against that projection and Machine's observed
+identity. The B watched request is A-owned, runner-group `0640`; this exact
+mode belongs in the reviewed install plan. The direct request stays `0440`.
+R never reopens the watched request path to make this decision.
+The signed outcome's `publication_mode` is `direct`: A signs it only after
+the watched rename and sync. A read-only recovery check may return that same
+outcome but cannot synthesize a newly signed recovered publication.
+The current H/Comms B ingress design covers the installed deterministic test
+provider: B checks the measured local Messages request before asking H for the
+one-use fixed response. It does not establish general vendor internet forwarding.
+
+`--profile managed-protected` requires the fixed Machine launcher, both
+assigned HQ sockets and `--protected-start-fd 3` on `run`. The inherited pipe
+carries a signed one-use Machine reservation, the complete launch-input
+records and the dedicated runner state path. The entry point checks the
+installed Machine public pin, signature, start identity, expiry and measured
+frozen layout before Hello. R then reads one bounded private HQ preface before
+ACP, verifies A's signed B finalization against that reservation and the live
+B relay socket, and obtains a fresh challenge-bound A-signed Live lease over
+the Machine-assigned R-only admission socket. Its watchdog renews the lease
+while protected Hello and Equip complete. Only then does R write a private
+readiness ack containing the latest signed lease digest and sequence. HQ then
+sends exactly one bounded second private frame with A's signed Hello
+finalization and child-start receipts. R checks both signatures against its
+installed Machine pin and binds their reservation, R/B and child identities,
+executable, sandbox, relay, environment and five-second expiry to its signed
+start. R returns the child receipt digest in a second private ack. Any
+attempted owner ACP bytes on this control pipe stop R. Machine's separate
+one-use stock child grant and signed child-start receipt are required before
+HQ may expose ACP. R never starts the child inside its own sandbox; a native
+macOS check rejected nested `sandbox-exec` with
+`sandbox_apply: Operation not permitted`.
+
+HQ must independently authenticate and finalize that same live start before
+its protected admission is usable. A direct
+protected request or a cooperative Hello with a protected grant refuses.
+Omitting `--profile` selects the cooperative default. Supplying it without a
+value stops startup before HQ admission.
+The default `managed-cooperative` request preserves existing hosts: it uses
+local spawn only when HQ explicitly reports `host.launch_unavailable` and the
+runner has not been marked as HQ-started.
+Before request-time fallback it proves the admitted runtime may use HQ's
+shared broker; an account-bound runtime with no returned endpoint fails
+closed. If attach fails after a reservation returned its verified endpoint,
+fallback uses that account endpoint.
 
 It never approves a permission request from an adapter. It answers
 `cancelled`, because approvals are HQ's records of the owner's decisions.
 
+On the ACP front door, `session/cancel` applies to the named session's
+oldest unfinished prompt. A queued prompt is removed and completes as
+`cancelled` while the active turn continues. For a running prompt the entry
+point forwards the notification and waits for the adapter's result. An ACP
+request-cancelled error confirms cancellation. Other errors and uncertain
+outcomes from earlier attempts can still reach the client. Cancellation
+prevents further automatic prompt retries.
+
 ## Files it reads
 
-Everything is under `<package>/Contents/`
+The cooperative layout is under `<package>/Contents/`
 ([soul-package layout](https://github.com/true-line/soul-package/blob/main/spec/LAYOUT.md)).
 
 | File | Fields read |
@@ -64,8 +177,67 @@ Exactly one member has the role `lead`. soul-package does not yet specify
 the fields of `SoulInfo.json` or `SoulLock.json`; the entry point reads only
 these and ignores the rest.
 
-It writes `host/members.sock` (0600, in a 0700 directory),
-`comms/notes/<note_id>.json` and each member's `home/<member>/`.
+Before using host state, the entry point requires the package root,
+`Contents/`, `host/`, and the state files to be real paths owned by its
+runtime account, with no group or other write access. It opens files without
+following their final symlinks and changes `host/` mode through an opened
+directory. If ownership or no-follow checks are unavailable, it refuses.
+It also checks every ancestor of the resolved package root from the filesystem
+root downward: an ancestor must be owned by root or the runtime account and
+must not be writable by another account, except for a sticky shared directory
+whose next component belongs to root or the runtime account. This prevents
+another account from replacing a parent between validation and a later path
+operation. On macOS the guard also reads native ACL entries through
+`/bin/ls -lde` and refuses any
+allow entry on those custody paths; deny-only entries remain valid. An
+unavailable or unparseable ACL listing fails closed.
+An owner-owned Soul therefore cannot be run directly under a different HQ
+account. These path checks do not make running untrusted Soul code as HQ safe;
+the launch account boundary still needs independent enforcement.
+
+It writes `host/members.sock` (0600, in a 0700 directory) for cooperative
+local fallback. An HQ launch gets a per-launch 0660 member socket in the
+harness account's verified endpoint directory in the current pilot. A
+separate-runner launch must supply `member_endpoint` with `directory`,
+`owner_uid`, `group_gid`, `dir_mode` (2750), `socket_mode` (660) and
+`peer_uids` (the distinct runner and bridge UIDs),
+alongside `member_socket`. This route refuses local adapter
+fallback if attach fails. The entry point bounds
+unauthenticated connections, requires the member token within five seconds,
+and joins in-flight kernel peer checks before removing the socket on stop. It
+also writes `comms/notes/<note_id>.json`
+and, for local fallback, each member's `home/<member>/`.
+
+## Protected preflight placement
+
+The Machine installation plan records the exact canonical absolute paths of
+the frozen package, the launch-input projection, and the per-installation
+state directory. The three trees are disjoint. The package and launch-input
+projection have root ownership throughout. The state leaf has mode `0700`,
+uses the installation ID as its name, and belongs to the plan's runner UID.
+Every ancestor of each tree must be root-owned, free of symlinks and allow
+ACLs, and writable only by root.
+
+On macOS, the physical plan must name an approved Machine-provisioned base,
+for example under `/private/var/db/managed-machine` after verification on the
+designated host. Use the canonical `/private/var` spelling. A projection or
+state directory below a runner-owned or daily-user home cannot satisfy the
+ancestry check.
+
+The preflight measures `Contents` and the frozen package records relative to
+the package root. It measures `host/adapters.json`, `host/installation.json`
+and the other reviewed launch files relative to the separate launch-input
+projection root. The launch measurement covers the full object, including the
+projected host values, selected command, full ordered argv, reviewed environment,
+effective configuration with its profile, system image constraints, sandbox policy and
+component digests for both the bridge and the HQ-hosted comms broker. Each
+selected system image binds its path, signing requirement and CDHash to the
+declared macOS version, build and kernel. The generated host files bind their
+exact raw bytes and parsed values. Named sandbox and component digests match
+files in the reviewed projection. Machine owns independent verification of
+the actual environment, selected runtime imports and the signed start required
+for protected admission.
+[Platform Stage 2a measurement rule](https://github.com/true-line/agent-bot-platform/blob/main/docs/03-architecture/interfaces/stage2a-measurement.md)
 
 ## What a member can ask
 
@@ -152,7 +324,7 @@ notice-consumer or MCP integration evidence.
 
 ## Contract validation
 
-The runtime consumes `soul-contracts` v0.4.1 through the commit and
+The runtime consumes `soul-contracts` v0.10.2 through the commit and
 `sha256-manifest-v1` digest in `governance/soul-contracts.json`. The explicit
 preparation step is documented in the [README](../README.md). Schemas and
 fixtures stay in that external dependency; none is copied into this
@@ -171,8 +343,8 @@ after reading. A corrupt or unreadable stored note makes its handoff
 restrictions unavailable; it is never silently discarded to allow fail-over.
 
 `tests/contracts.test.mjs` runs every shared positive and negative fixture
-through the runtime codec for its schema/parse verdict (33 positives and 55
-negatives across 19 schemas), checks their byte pins and canonicalization
+through the runtime codec for its schema/parse verdict (69 positives and 144
+negatives across 45 schemas), checks their byte pins and canonicalization
 vectors, and exercises the two T14 version/capability refusals. This is
 component evidence for the platform's
 [Stage 0 gate](https://github.com/true-line/agent-bot-platform/blob/main/docs/10-program/roadmap.md),
