@@ -18,8 +18,8 @@ passing physical gate.
    `souls-build-receipt.yml` with that commit as `approved_source_commit`, plus
    the SHA-256 and UTC observation time of the owner's fresh private R2 lock
    attestation. The workflow refuses a different SHA or unprotected ref. It
-   also refuses to build until Souls adopts the current v0.10.2 Contracts
-   release pin and matching reviewed HQ SDK pin.
+   also refuses to build until Souls adopts the exact Contracts release pin
+   required by that workflow and the matching reviewed HQ SDK pin.
 2. Approve the `qualification-release` environment for this exact run. The
    workflow tests the checked-out source, builds the npm archive, selected R tar and in-toto
    Statement, proves live R2 canary lock enforcement, uploads each asset once,
