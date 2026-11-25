@@ -2,8 +2,8 @@
 // agent-bot-souls: the Soul runtime's executable (platform PDR-0037),
 // reached through the shim as `agent-bot souls …`.
 //
-//   agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH (--broker-socket PATH | --member-socket PATH --relay-socket PATH)] [--profile PROFILE] [--protected-start-fd 3 | --cooperative-start-fd 3]
-//   agent-bot-souls chat --soul DIR [--hq-home DIR] [--profile PROFILE]   a terminal chat with the Soul
+//   agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH (--broker-socket PATH | --member-socket PATH --relay-socket PATH)] [--profile PROFILE] [--protected-start-fd 3 | --cooperative-start-fd 3] [--standalone]
+//   agent-bot-souls chat --soul DIR [--hq-home DIR] [--profile PROFILE] [--standalone]   a terminal chat with the Soul
 //   agent-bot-souls member <op> [JSON]                a member's requests, from inside a member
 //   agent-bot-souls fake-adapter                      the fake ACP adapter (testing and demos)
 //
@@ -24,8 +24,8 @@ import { beginProtectedControl } from '../lib/protected-control.mjs';
 import { readProtectedSoulLayout } from '../lib/soul.mjs';
 
 const USAGE = `usage:
-  agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH (--broker-socket PATH | --member-socket PATH --relay-socket PATH)] [--profile managed-cooperative|managed-protected] [--protected-start-fd 3 | --cooperative-start-fd 3]
-  agent-bot-souls chat --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile managed-cooperative|managed-protected]
+  agent-bot-souls run  --soul DIR [--hq-home DIR | --admission-socket PATH (--broker-socket PATH | --member-socket PATH --relay-socket PATH)] [--profile managed-cooperative|managed-protected] [--protected-start-fd 3 | --cooperative-start-fd 3] [--standalone]
+  agent-bot-souls chat --soul DIR [--hq-home DIR | --admission-socket PATH --broker-socket PATH] [--profile managed-cooperative|managed-protected] [--standalone]
   agent-bot-souls member <runtime|directives|handoffs|get|commit|route|note> [JSON]
   agent-bot-souls fake-adapter
   agent-bot-souls --version`;
@@ -43,13 +43,19 @@ const MEMBER_OPS = {
 function options(argv) {
   const out = {};
   const optionsWithValues = ['--soul', '--hq-home', '--admission-socket', '--broker-socket', '--member-socket', '--relay-socket', '--profile', '--protected-start-fd', '--cooperative-start-fd'];
-  for (let i = 0; i < argv.length; i += 2) {
+  for (let i = 0; i < argv.length; i += 1) {
     const option = argv[i];
+    const name = option.slice(2);
+    if (Object.hasOwn(out, name)) throw new Error(`${option} may only be supplied once`);
+    if (option === '--standalone') {
+      out.standalone = true;
+      continue;
+    }
     if (!optionsWithValues.includes(option)) throw new Error(`unknown argument ${option}`);
     const value = argv[i + 1];
-    if (!value || optionsWithValues.includes(value)) throw new Error(`${option} requires a value`);
-    if (Object.hasOwn(out, option.slice(2))) throw new Error(`${option} may only be supplied once`);
-    out[option.slice(2)] = value;
+    if (!value || value === '--standalone' || optionsWithValues.includes(value)) throw new Error(`${option} requires a value`);
+    out[name] = value;
+    i += 1;
   }
   if (!out.soul) throw new Error('--soul DIR is required');
   if (out['protected-start-fd'] !== undefined && out['protected-start-fd'] !== '3') throw new Error('--protected-start-fd requires inherited fd 3');
@@ -57,12 +63,16 @@ function options(argv) {
   if (out['protected-start-fd'] !== undefined && out['cooperative-start-fd'] !== undefined) throw new Error('fd 3 accepts one start profile');
   const explicit = ['admission-socket', 'broker-socket', 'member-socket', 'relay-socket']
     .some((name) => out[name] !== undefined);
-  return { root: out.soul, protectedStartFd: out['protected-start-fd'] === undefined ? undefined : 3,
+  if (out.standalone && (explicit || out.profile !== undefined
+    || out['protected-start-fd'] !== undefined || out['cooperative-start-fd'] !== undefined)) {
+    throw new Error('--standalone requires the default profile and HQ endpoints resolved from the HQ home');
+  }
+  return { root: out.soul, standalone: out.standalone, protectedStartFd: out['protected-start-fd'] === undefined ? undefined : 3,
     cooperativeStartFd: out['cooperative-start-fd'] === undefined ? undefined : 3, ...(explicit
     ? { admissionSocket: out['admission-socket'], brokerSocket: out['broker-socket'],
       memberSocket: out['member-socket'], relaySocket: out['relay-socket'],
       ...(out['hq-home'] !== undefined ? { hqHome: out['hq-home'] } : {}) }
-    : { hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq') }), requestedProfile: out.profile ?? 'managed-cooperative' };
+    : { hqHome: out['hq-home'] ?? process.env.AGENT_BOT_HQ_HOME ?? join(homedir(), '.agent-bot-hq') }), requestedProfile: out.profile };
 }
 
 async function main([cmd, ...rest]) {

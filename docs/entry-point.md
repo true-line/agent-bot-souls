@@ -27,6 +27,28 @@ and sections 3, 5, 7 and 9 of the
    is given the live handoff notes before its first turn.
 6. **Runs the recovery ladder** when a member fails.
 
+## Run without HQ
+
+Pass `--standalone` to `run` or `chat` for that invocation. The local entry
+point checks `admission.sock` under the configured HQ home. If HQ listens,
+the normal admission flow takes precedence and reports that the switch was
+ignored. An admission refusal or a connection error other than a missing or
+stopped socket is returned to the caller. Without the switch, a missing or
+stopped HQ stops the run and reports the condition.
+
+With the switch and no listening HQ, adapters run in the invoking OS account
+using its sign-ins. Status reports `standalone-unenforced` and the observed
+HQ condition. Local role routing and reads of existing handoffs remain
+available. Runtime and broker operations and typed note writes return
+`souls.unmanaged`. The installation receives no HQ epoch, lease, or approval
+record. A failed adapter sign-in returns control to the owner.
+
+Use the regular HQ home form of the command for standalone. Explicit profiles,
+assigned sockets, inherited start descriptors and HQ-required starts require
+HQ throughout. The platform's
+[PDR-0055](https://github.com/true-line/agent-bot-platform/blob/main/docs/04-decisions/PDR-0055-a-soul-is-managed-when-hq-starts-it.md)
+defines this as an unmanaged Soul.
+
 ## What it never does
 
 It holds no keys and decides no grant. It does not commit to tasks. A member
@@ -383,49 +405,6 @@ to the specialist, and makes the final commitment from the proposal. As a
 specialist it produces an artifact and proposes. It exists so the entry
 point can be run and tested before a real adapter does. Real adapters come
 from [soul-adapters](https://github.com/true-line/soul-adapters).
-
-## Without HQ
-
-The rule is the owner's ([#4](https://github.com/true-line/agent-bot-souls/issues/4),
-platform [PDR-0055](https://github.com/true-line/agent-bot-platform/blob/main/docs/04-decisions/PDR-0055-a-soul-is-managed-when-hq-starts-it.md)).
-HQ is there when it is on the system and running, which the entry point
-reads as: `<hq-home>/admission.sock` answers.
-
-| HQ | `--standalone` not given | `--standalone` given |
-| --- | --- | --- |
-| Running | The HQ flow | The HQ flow; the `standalone-ignored` event says the switch was ignored |
-| Installed (`<hq-home>` exists), not running | Stops: HQ is installed and not running | Runs unmanaged |
-| Not installed | Stops: HQ is not installed | Runs unmanaged |
-
-The message names the case it found and the way to run without HQ. Any
-other failure to reach the socket, and an HQ that answers and then refuses
-or fails, is an error: nothing drops to standalone on its own.
-
-`--standalone` is given per run, on `run` and `chat`. There is no settings
-file and no environment variable for it. A file under `Contents/host/`
-would travel with the package on a move or fork, and a file or an exported
-variable outlives the run, so when HQ later stopped on that host the Soul
-would run without it with nobody choosing that. That is the silent
-downgrade R8 rules out and RISK-007 watches.
-
-A standalone run is an unmanaged Soul. Its status reports profile
-`standalone-unenforced`, `hq` as `not-installed` or `not-running`, no
-installation epoch or lease generation, and these warnings:
-
-- the owner has not accepted the definition digest;
-- there are no brokered credentials: each harness uses the sign-in its
-  account already has;
-- there are no receipts, budgets or task records;
-- there is no separation between members: all run in the account that
-  started the entry point.
-
-It sends no Hello and has no admission result; that record is HQ's alone.
-The member operations that go to the entry point (`route`, `note`,
-`handoffs`) work. `runtime` is refused with `souls.unmanaged`, so the
-broker operations (`directives`, `get`, `commit`) fail with that code. A
-crash is restarted on the usual backoff without an admission. An
-authentication failure has no HQ to re-equip the member, so it is the
-owner's decision at once. The lead's brief says the Soul runs unmanaged.
 
 ## Not built yet
 

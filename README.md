@@ -21,10 +21,9 @@ agent-bot-souls chat --soul DIR [--hq-home DIR] [--standalone]   # a terminal ch
 `DIR` is the Soul package directory, the one that holds `Contents/`.
 `--hq-home` is HQ's state directory: `$AGENT_BOT_HQ_HOME`, else
 `~/.agent-bot-hq`. HQ must be running with a broker plugin, and the owner
-must have accepted the Soul's definition digest there. If HQ is not
-running, the entry point stops unless the run is given `--standalone`, which
-runs the Soul unmanaged, without anything HQ provides
-([docs/entry-point.md](docs/entry-point.md#without-hq)). With the `agent-bot`
+must have accepted the Soul's definition digest there. Pass `--standalone`
+for an unmanaged run when HQ is unavailable. A listening HQ takes precedence.
+With the `agent-bot`
 shim installed, the same commands are `agent-bot souls run` and
 `agent-bot souls chat`
 ([platform PDR-0037](https://github.com/true-line/agent-bot-platform/blob/main/docs/04-decisions/PDR-0037-agent-bot-executables-are-daemon-plugins-behind-a-shim.md)).

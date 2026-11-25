@@ -1,121 +1,146 @@
-// Running a Soul without HQ (agent-bot-souls#4, platform PDR-0055). HQ is
-// there when its admission socket answers; then the HQ flow is used and
-// --standalone is ignored, and said so. Otherwise the entry point stops and
-// says which case it found, unless the person running the Soul asked for
-// --standalone this run. A standalone run is an unmanaged Soul and reports
-// `standalone-unenforced`. The running-HQ case runs the real HQ.
-import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { HqNotFound, SoulUnavailable, STANDALONE_WARNINGS, startSoul } from '../lib/entry-point.mjs';
-import { BIN, fake, makeSoul, SOUL, startHQ } from './harness.mjs';
+import { test } from 'node:test';
+import { SoulUnavailable, startSoul } from '../lib/entry-point.mjs';
+import { BIN, fake, hqProxy, makeSoul, startHQ } from './harness.mjs';
 
-const absent = () => join(tmpdir(), `no-hq-${process.pid}-${Math.random().toString(16).slice(2)}`);
-const quiet = { delay: async () => {}, renewEveryMs: 0 };
+const quiet = { delay: async () => {}, renewEveryMs: 0, env: {} };
 
-async function standalone(t, hqHome, soulOptions) {
-  const root = makeSoul(soulOptions);
+function packageAndHqHome(t, options) {
+  const root = makeSoul(options);
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const soul = await startSoul({ root, hqHome, standalone: true, ...quiet });
-  t.after(() => soul.stop());
-  return { root, soul };
+  return { root, hqHome: join(root, 'hq') };
 }
 
-test('with no HQ installed and no --standalone, the entry point stops and says so', async (t) => {
-  const root = makeSoul();
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const hqHome = absent();
-  await assert.rejects(startSoul({ root, hqHome, ...quiet }), (e) => {
-    assert.ok(e instanceof HqNotFound);
-    assert.equal(e.found, 'not-installed');
-    assert.match(e.message, /HQ is not installed/);
-    assert.match(e.message, /--standalone/);
-    return true;
+for (const condition of ['not-installed', 'not-running']) {
+  test(`local start with HQ ${condition} requires an explicit per-run switch`, async (t) => {
+    const paths = packageAndHqHome(t);
+    if (condition === 'not-running') mkdirSync(paths.hqHome);
+    await assert.rejects(startSoul({ ...paths, ...quiet }), { name: 'HqUnavailable', status: condition });
+    assert.equal(existsSync(join(paths.root, 'Contents/host/installation.json')), false);
+
+    const soul = await startSoul({ ...paths, ...quiet, standalone: true });
+    try {
+      const status = soul.status();
+      assert.equal(status.hq, condition);
+      assert.equal(status.profile, 'standalone-unenforced');
+      assert.equal(status.installation_epoch, undefined);
+      assert.equal(status.lease_generation, undefined);
+      await soul.renew();
+      assert.match((await soul.prompt('Hello.')).text, /runs unmanaged/);
+      assert.equal(soul.events().some((event) => event.event === 'admitted'), false);
+    } finally { await soul.stop(); }
   });
-  assert.equal(existsSync(join(root, 'Contents', 'host', 'members.sock')), false, 'nothing was started');
-});
+}
 
-test('with HQ installed and not running, and no --standalone, the entry point stops and names that case', async (t) => {
-  const root = makeSoul();
-  const hqHome = mkdtempSync(join(tmpdir(), 'hq-'));
-  t.after(() => { rmSync(root, { recursive: true, force: true }); rmSync(hqHome, { recursive: true, force: true }); });
-  await assert.rejects(startSoul({ root, hqHome, ...quiet }), (e) => {
-    assert.ok(e instanceof HqNotFound);
-    assert.equal(e.found, 'not-running');
-    assert.match(e.message, /installed at .* but not running/);
-    return true;
-  });
-});
-
-test('--standalone with no HQ runs an unmanaged Soul that reports standalone-unenforced and what it lacks', async (t) => {
-  const { soul } = await standalone(t, absent());
-  const status = soul.status();
-  assert.equal(status.state, 'ready');
-  assert.equal(status.soul_id, SOUL);
-  assert.equal(status.profile, 'standalone-unenforced');
-  assert.equal(status.hq, 'not-installed');
-  assert.deepEqual(status.warnings, [...STANDALONE_WARNINGS]);
-  assert.equal(status.installation_epoch, undefined, 'no epoch without HQ');
-  assert.equal(status.lease_generation, undefined, 'no lease without HQ');
-  const [started] = soul.events();
-  assert.deepEqual([started.event, started.hq, started.profile], ['standalone', 'not-installed', 'standalone-unenforced']);
-  assert.equal(soul.events().filter((e) => e.event === 'admitted').length, 0);
-
-  // The owner's conversation still works. The lead's runtime is refused as
-  // unmanaged, so it has no directives or task records to work.
-  const result = await soul.prompt('Anything waiting?');
-  assert.equal(result.member_id, 'm_lead');
-  assert.match(result.text, /runs unmanaged, without HQ; there are no directives or task records/);
-});
-
-test('--standalone with HQ installed and not running proceeds, and says it found HQ stopped', async (t) => {
-  const hqHome = mkdtempSync(join(tmpdir(), 'hq-'));
-  t.after(() => rmSync(hqHome, { recursive: true, force: true }));
-  const { soul } = await standalone(t, hqHome);
-  assert.deepEqual([soul.status().profile, soul.status().hq], ['standalone-unenforced', 'not-running']);
-  assert.match(soul.events()[0].message, /HQ is installed and not running/);
-});
-
-test('with HQ running, --standalone is ignored and said so: the HQ flow is used', async (t) => {
+test('listening HQ takes precedence and its Hello refusal still stops the run', async (t) => {
+  const { root } = packageAndHqHome(t);
   const hq = await startHQ();
-  const root = makeSoul();
-  t.after(async () => { await hq.done(); rmSync(root, { recursive: true, force: true }); });
-  const soul = await startSoul({ root, hqHome: hq.home, standalone: true, ...quiet });
-  t.after(() => soul.stop());
-  const status = soul.status();
-  assert.deepEqual([status.profile, status.hq, status.installation_epoch], ['managed-cooperative', 'running', 1]);
-  const ignored = soul.events().find((e) => e.event === 'standalone-ignored');
-  assert.match(ignored.message, /--standalone was ignored/);
-  assert.equal(soul.events().filter((e) => e.event === 'standalone').length, 0);
-  assert.equal(hq.hq.core.receipts.filter((r) => r.kind === 'hq.admission').length, 1);
+  t.after(() => hq.done());
+  let soul = await startSoul({ root, hqHome: hq.home, ...quiet, standalone: true });
+  try {
+    assert.equal(soul.status().profile, 'managed-cooperative');
+    assert.ok(soul.events().some((event) => event.event === 'standalone-ignored'));
+  } finally { await soul.stop(); }
+
+  const proxy = await hqProxy(hq, ({ op, reply }) => op === 'Hello' && reply.ok
+    ? { id: reply.id, ok: false, refusal: { error: 'profile_insufficient', explanation: 'requested profile unavailable', correlation_id: 'corr_profile' } }
+    : reply);
+  try {
+    await assert.rejects(startSoul({ root, hqHome: proxy.home, ...quiet, standalone: true }),
+      { name: 'HqRefusal', op: 'Hello', code: 'profile_insufficient' });
+  } finally { await proxy.done(); }
 });
 
-test('without HQ an authentication failure has nothing to re-equip it: it is the owner\'s decision', async (t) => {
-  const { soul } = await standalone(t, absent(), { lead: { fail: 'auth' } });
-  await assert.rejects(soul.prompt('go'), (e) => e instanceof SoulUnavailable && e.state === 'needs-owner' && /no HQ to re-equip/.test(e.reason));
+test('standalone cannot replace a required HQ launch, assigned endpoints or an explicit profile', async (t) => {
+  const { root, hqHome } = packageAndHqHome(t);
+  for (const options of [
+    { hqHome, env: { AGENT_BOT_SOULS_REQUIRE_HQ_LAUNCH: '1' } },
+    { admissionSocket: join(hqHome, 'admission.sock'), brokerSocket: join(hqHome, 'broker.sock') },
+    { hqHome, requestedProfile: 'managed-cooperative' },
+    { hqHome, requestedProfile: 'managed-protected' },
+    { hqHome, cooperativeStart: {} },
+    { hqHome, protectedStart: {} },
+  ]) {
+    await assert.rejects(startSoul({ root, ...quiet, standalone: true, ...options }),
+      { name: 'SoulUnavailable', code: 'profile_insufficient' });
+  }
+  assert.equal(existsSync(join(root, 'Contents/host/installation.json')), false);
 });
 
-test('without HQ a crashed member is restarted without an admission and the turn continues', async (t) => {
-  const { soul } = await standalone(t, absent(), { lead: { crash: 'on-prompt', once: true } });
-  const result = await soul.prompt('go');
-  assert.match(result.text, /runs unmanaged/);
-  assert.deepEqual(soul.events().filter((e) => e.event === 'recovery').map((e) => [e.member_id, e.failure, e.action]), [['m_lead', 'crash', 'restart']]);
-  assert.equal(soul.events().filter((e) => e.event === 'admitted').length, 0);
+test('standalone returns a typed refusal for note writes and broker operations', async (t) => {
+  const adapter = `
+    import { connectMember } from ${JSON.stringify(new URL('../lib/member.mjs', import.meta.url).href)};
+    import { rpcPeer } from ${JSON.stringify(new URL('../lib/jsonrpc.mjs', import.meta.url).href)};
+    const peer = rpcPeer({
+      input: process.stdin,
+      output: process.stdout,
+      methods: {
+        initialize: () => ({ protocolVersion: 1 }),
+        'session/new': () => ({ sessionId: 'test-session' }),
+        'session/prompt': async ({ sessionId }) => {
+          const member = await connectMember();
+          try {
+            const refusals = [];
+            for (const perform of [
+              () => member.note({ type: 'finding', body: 'local test' }),
+              () => member.directives(),
+            ]) {
+              try { await perform(); refusals.push(null); }
+              catch (error) { refusals.push(error.code); }
+            }
+            peer.notify('session/update', { sessionId, update: { sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: JSON.stringify(refusals) } } });
+            return { stopReason: 'end_turn' };
+          } finally { await member.close(); }
+        },
+      },
+    });
+  `;
+  const paths = packageAndHqHome(t, { adapters: {
+    'fake-lead': { command: [process.execPath, '--input-type=module', '-e', adapter] },
+    'fake-specialist': fake(),
+  } });
+  const soul = await startSoul({ ...paths, ...quiet, standalone: true });
+  try {
+    const result = await soul.prompt('Start the lead.');
+    assert.deepEqual(JSON.parse(result.text), ['souls.unmanaged', 'souls.unmanaged']);
+  } finally { await soul.stop(); }
 });
 
-test('the executable stops without HQ, and with --standalone a chat reports the unmanaged profile', (t) => {
-  const root = makeSoul({ adapters: { 'fake-lead': fake(), 'fake-specialist': fake() } });
-  t.after(() => rmSync(root, { recursive: true, force: true }));
-  const env = { ...process.env, AGENT_BOT_HQ_HOME: absent() };
-  const stopped = spawnSync(process.execPath, [BIN, 'run', '--soul', root], { env, input: '', encoding: 'utf8' });
-  assert.equal(stopped.status, 1);
-  assert.match(stopped.stderr, /agent-bot-souls: HQ is not installed .*--standalone/);
+test('standalone restarts a crashed adapter and sends an auth failure to the owner', async (t) => {
+  const crash = packageAndHqHome(t, { lead: { crash: 'on-prompt', once: true } });
+  let soul = await startSoul({ ...crash, ...quiet, standalone: true });
+  try {
+    assert.match((await soul.prompt('Restart the lead.')).text, /runs unmanaged/);
+    assert.ok(soul.events().some((event) => event.event === 'recovery' && event.action === 'restart'));
+  } finally { await soul.stop(); }
 
-  const ran = spawnSync(process.execPath, [BIN, 'chat', '--soul', root, '--standalone'], { env, input: '/status\n/quit\n', encoding: 'utf8' });
-  assert.equal(ran.status, 0, ran.stderr);
-  assert.equal(JSON.parse(ran.stdout).profile, 'standalone-unenforced');
-  assert.match(ran.stderr, /"event":"standalone"/);
+  const auth = packageAndHqHome(t, { lead: { fail: 'auth' } });
+  soul = await startSoul({ ...auth, ...quiet, standalone: true });
+  try {
+    await assert.rejects(soul.prompt('Check auth.'), { name: SoulUnavailable.name, state: 'needs-owner' });
+  } finally { await soul.stop(); }
+});
+
+test('the CLI requires the flag, reports the standalone profile and refuses conflicting options', (t) => {
+  const { root, hqHome } = packageAndHqHome(t);
+  const run = (args, input = '') => spawnSync(process.execPath, [BIN, ...args], {
+    env: { ...process.env, AGENT_BOT_HQ_HOME: hqHome },
+    input, encoding: 'utf8',
+  });
+  const missing = run(['run', '--soul', root]);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stderr, /HQ home is missing.*--standalone/);
+  const started = run(['chat', '--standalone', '--soul', root], '/status\n/quit\n');
+  assert.equal(started.status, 0, started.stderr);
+  assert.equal(JSON.parse(started.stdout).profile, 'standalone-unenforced');
+  const acp = run(['run', '--soul', root, '--standalone']);
+  assert.equal(acp.status, 0, acp.stderr);
+  assert.match(acp.stderr, /"event":"standalone"/);
+  const conflict = run(['run', '--soul', root, '--standalone', '--protected-start-fd', '3']);
+  assert.equal(conflict.status, 1);
+  assert.match(conflict.stderr, /--standalone requires the default profile/);
 });
