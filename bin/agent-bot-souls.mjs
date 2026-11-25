@@ -46,14 +46,15 @@ function options(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const option = argv[i];
     const name = option.slice(2);
-    if (Object.hasOwn(out, name)) throw new Error(`${option} may only be supplied once`);
     if (option === '--standalone') {
+      if (out.standalone) throw new Error('--standalone may only be supplied once');
       out.standalone = true;
       continue;
     }
     if (!optionsWithValues.includes(option)) throw new Error(`unknown argument ${option}`);
     const value = argv[i + 1];
     if (!value || value === '--standalone' || optionsWithValues.includes(value)) throw new Error(`${option} requires a value`);
+    if (Object.hasOwn(out, name)) throw new Error(`${option} may only be supplied once`);
     out[name] = value;
     i += 1;
   }
