@@ -14,17 +14,24 @@ The entry point is row 14 of agent-bot-hq's
 ## Use
 
 ```sh
-agent-bot-souls run  --soul DIR [--hq-home DIR]   # the ACP front door, on stdio
-agent-bot-souls chat --soul DIR [--hq-home DIR]   # a terminal chat with the Soul
+agent-bot-souls run  --soul DIR [--hq-home DIR] [--standalone]   # the ACP front door, on stdio
+agent-bot-souls chat --soul DIR [--hq-home DIR] [--standalone]   # a terminal chat with the Soul
 ```
 
 `DIR` is the Soul package directory, the one that holds `Contents/`.
 `--hq-home` is HQ's state directory: `$AGENT_BOT_HQ_HOME`, else
 `~/.agent-bot-hq`. HQ must be running with a broker plugin, and the owner
-must have accepted the Soul's definition digest there. With the `agent-bot`
+must have accepted the Soul's definition digest there. Pass `--standalone`
+for an unmanaged run when HQ is unavailable. A listening HQ takes precedence.
+With the `agent-bot`
 shim installed, the same commands are `agent-bot souls run` and
 `agent-bot souls chat`
 ([platform PDR-0037](https://github.com/true-line/agent-bot-platform/blob/main/docs/04-decisions/PDR-0037-agent-bot-executables-are-daemon-plugins-behind-a-shim.md)).
+
+For a runner with separately provisioned endpoints, use both
+`--admission-socket PATH` and `--broker-socket PATH` instead of `--hq-home`.
+Both paths must be absolute and distinct. These paths do not authenticate the
+runner or establish protected-launch authority; protected starts remain refused.
 
 Node 20 or later, no npm dependencies. Unix sockets only, as HQ is today.
 

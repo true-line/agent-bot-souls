@@ -1,10 +1,10 @@
 {
   "repository": "https://github.com/true-line/agent-bot-hq",
-  "commit": "bfc0bf0f15e1bb19fca4d8327c2935b430791c38",
+  "commit": "744a9d9b2eb6d6b956691cad65a5228ee429b269",
   "files": {
     "sdk/errors.mjs": "fde3ecf83405173b60a105aa88a7deb1992c09de8743253f3aeee8c6a7eb6177",
     "sdk/wire/canonical-json.mjs": "331ffdcb00e287552b38b215a0c5dc19340b86d6503863c30d3785bdddc0580b",
-    "sdk/wire/schema.mjs": "8bfa39fe56120b7317b08af82f2aca671051f2d48178047679e46de49382b460",
+    "sdk/wire/schema.mjs": "664dee7991cc0c56e1ba42d53ba7d24d85277ca615bafec8c1c34eaf547c7e8a",
     "sdk/wire/strict-json.mjs": "2708f4eca2ab24ff761bd216f53d3647fb66c3b196730a2574eb7560c0db4e9e",
     "sdk/wire/versions.mjs": "b5528e5e25ebe6f5ed13ca54360e4792e2d662ecf59e1161ae6a1475514f5704",
     "LICENSE": "9992492a651a77038f1a616beb4b4cc9eb8513679991e67912963df719057f61",

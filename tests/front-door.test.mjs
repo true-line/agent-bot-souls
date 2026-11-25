@@ -5,7 +5,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { readFileSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { rpcPeer } from '../lib/jsonrpc.mjs';
 import { BIN, fake, makeSoul, SOUL, startHQ } from './harness.mjs';
@@ -197,17 +198,18 @@ test('agent-bot-souls chat is the same conversation in a terminal', async () => 
   } finally { child.kill('SIGKILL'); await t.done(); }
 });
 
-test('the executable reports a strict protected-profile refusal', async () => {
+for (const mode of ['run', 'chat']) test(`the ${mode} executable refuses a protected profile before startup`, async () => {
   const t = await world();
   try {
-    await assert.rejects(promisify(execFile)(process.execPath, [BIN, 'run', '--soul', t.root, '--hq-home', t.home, '--profile', 'managed-protected'], { timeout: 5000 }), (error) => {
+    await assert.rejects(promisify(execFile)(process.execPath, [BIN, mode, '--soul', t.root, '--hq-home', t.home, '--profile', 'managed-protected'], { timeout: 5000 }), (error) => {
       assert.equal(error.code, 1);
       const lines = error.stderr.trim().split('\n');
       const event = JSON.parse(lines[0]);
-      assert.deepEqual(event, { event: 'profile-refused', code: 'profile_insufficient', source: 'local', requested_profile: 'managed-protected', granted_profile: 'managed-cooperative' });
-      assert.match(lines[1], /agent-bot-souls: the Soul is unavailable: profile_insufficient: HQ granted managed-cooperative when managed-protected was requested/);
+      assert.deepEqual(event, { event: 'profile-refused', code: 'profile_insufficient', source: 'local', requested_profile: 'managed-protected' });
+      assert.match(lines[1], /agent-bot-souls: the Soul is unavailable: profile_insufficient: Machine-authenticated protected Soul launch inputs are unavailable/);
       return true;
     });
+    assert.equal(existsSync(join(t.root, 'Contents/host/installation.json')), false);
   } finally { await t.done(); }
 });
 
@@ -231,6 +233,18 @@ test('run and chat reject an option missing its value before HQ admission', asyn
     }
     assert.equal(t.hq.core.receipts.some(receipt => receipt.kind === 'hq.admission'), false);
   } finally { await t.done(); }
+});
+
+test('the executable rejects ambiguous or incomplete explicit HQ endpoints', async () => {
+  const execute = promisify(execFile);
+  for (const args of [
+    ['--admission-socket', '/a'],
+    ['--hq-home', '/hq', '--admission-socket', '/a', '--broker-socket', '/b'],
+    ['--admission-socket', '/a', '--broker-socket', '/b', '--broker-socket', '/c'],
+  ]) {
+    await assert.rejects(execute(process.execPath, [BIN, 'run', '--soul', '/unused', ...args]),
+      (error) => error.code === 1 && /provide distinct absolute|may only be supplied once/.test(error.stderr));
+  }
 });
 
 test('the executable reports its version and refuses what it does not know', () => {

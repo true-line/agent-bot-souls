@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Fail-closed Stage 2a R2 transport proposal; never prints credentials or bytes.
+"""Fail-closed Stage 2a R2 transport; never prints credentials or asset bytes.
 
-This script is deliberately unreachable behind the workflow's first hard hold.
-The protected environment supplies separate bucket-scoped S3 writer and reader
-credentials. An owner-controlled lock attestation is checked outside CI; a
-fresh evidence digest and time are required here as an explicit manual gate.
+The protected build-candidate workflow supplies separate bucket-scoped S3
+writer and reader credentials. Each upload proves current lock enforcement and
+reads back exact bytes through the reader. The owner-controlled dashboard
+attestation supplies the rule duration outside CI, before upload and again
+afterward for final release review. A successful upload is not certification.
 """
 
 import argparse
@@ -34,7 +35,8 @@ MIN_LOCK_SECONDS = 365 * 24 * 60 * 60
 MAX_ATTESTATION_AGE = timedelta(hours=1)
 ROLES = frozenset({
     "qualification", "policy-envelope", "protected-envelope",
-    "cooperative-envelope", "souls-package", "souls-build-bundle",
+    "cooperative-envelope", "souls-package", "souls-r-tar", "souls-build-bundle",
+    "canary-receipt",
 })
 URI_PATTERN = re.compile(r"\Aqualification://stage2a/([a-z-]+)/([0-9a-f]{64})\Z")
 SHA_PATTERN = re.compile(r"\A[0-9a-f]{64}\Z")
@@ -150,6 +152,8 @@ def probe_get(key, expected=None):
         data = body.read(65)
     if expected is None or data != expected:
         raise TransportError("private probe bytes or absence differ")
+    return {"sha256": f"sha256:{hashlib.sha256(data).hexdigest()}",
+            "byte_length": len(data)}
 
 
 def probe_put(key, data, conditional):
@@ -174,7 +178,7 @@ def require_lock_rejection(operation):
         operation()
     except ClientError as error:
         if probe_error(error, 409, "ObjectLockedByBucketPolicy"):
-            return
+            return {"http_status": 409, "error_code": "ObjectLockedByBucketPolicy"}
         raise TransportError("private canary got wrong lock refusal") from None
     except (BotoCoreError, OSError):
         raise TransportError("private canary lock probe failed") from None
@@ -192,28 +196,48 @@ def prove_bucket_lock():
     # A failed PUT may have reached R2 even if its response was lost. Always
     # try to remove this unlocked probe key, including after a read or write
     # failure. The retained locked canary below is never part of cleanup.
+    failed_step = None
+    step = "create"
     try:
         probe_put(disposable, first, conditional=True)
+        step = "first read"
         probe_get(disposable, first)
+        step = "overwrite"
         probe_put(disposable, second, conditional=False)
+        step = "second read"
         probe_get(disposable, second)
+    except TransportError:
+        failed_step = step
     finally:
+        cleanup_failures = []
         try:
             probe_delete(disposable)
+        except TransportError:
+            cleanup_failures.append("delete")
+        try:
             probe_get(disposable, None)
         except TransportError:
-            raise TransportError("private scope-test cleanup failed; check for disposable residue") from None
+            cleanup_failures.append("absence read")
+        if cleanup_failures:
+            first = f"private scope-test {failed_step} failed; " if failed_step else ""
+            raise TransportError(
+                f"{first}private scope-test cleanup failed ({', '.join(cleanup_failures)}); "
+                "check for disposable residue") from None
+    if failed_step:
+        raise TransportError(f"private scope-test {failed_step} failed") from None
     probe_get(canary, None)
     probe_put(canary, first, conditional=True)
     probe_get(canary, first)
-    require_lock_rejection(lambda: probe_client("PUT", canary, "WRITE").put_object(
+    overwrite_refusal = require_lock_rejection(lambda: probe_client("PUT", canary, "WRITE").put_object(
         Bucket=BUCKET, Key=canary, Body=second, ContentLength=len(second)))
-    require_lock_rejection(lambda: probe_client("DELETE", canary, "WRITE").delete_object(
+    delete_refusal = require_lock_rejection(lambda: probe_client("DELETE", canary, "WRITE").delete_object(
         Bucket=BUCKET, Key=canary))
-    probe_get(canary, first)
+    readback = probe_get(canary, first)
     return {"key": canary, "sha256": f"sha256:{hashlib.sha256(first).hexdigest()}",
             "scope_test_cleaned": True, "locked_overwrite_denied": True,
-            "locked_delete_denied": True, "reader_bytes_unchanged": True}
+            "locked_delete_denied": True, "reader_bytes_unchanged": True,
+            "overwrite_refusal": overwrite_refusal, "delete_refusal": delete_refusal,
+            "reader_readback": readback}
 
 
 def s3_request(method, key, kind, source=None, destination=None, expected_length=None):
@@ -321,6 +345,30 @@ def read(uri, expected_sha256, length, destination):
             "operator_lock_gate": gate, "bucket": BUCKET, "account": ACCOUNT}
 
 
+def canary():
+    """Persist a private canary receipt without uploading a release asset."""
+    proof = prove_bucket_lock()
+    receipt = {"schema": "stage2a-r2-canary-v1", "observed_at_utc":
+               datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+               "github_run_id": os.environ.get("GITHUB_RUN_ID", ""),
+               "github_sha": os.environ.get("GITHUB_SHA", ""),
+               "canary": proof,
+               "bucket": BUCKET, "account": ACCOUNT}
+    encoded = (json.dumps(receipt, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    digest = hashlib.sha256(encoded).hexdigest()
+    uri, key = asset_ref("canary-receipt", digest)
+    with tempfile.TemporaryDirectory(prefix="stage2a-canary-receipt-") as directory:
+        source = Path(directory) / "receipt.json"
+        descriptor = os.open(source, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(encoded)
+        s3_request("PUT", key, "WRITE", source=source)
+        download_verified(key, digest, len(encoded), Path(directory) / "readback.json")
+    return {"result": "pass", "receipt_uri": uri, "receipt_sha256": f"sha256:{digest}",
+            "receipt_byte_length": len(encoded), "observed_at_utc": receipt["observed_at_utc"],
+            "lock_duration_verified_by_ci": False}
+
+
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -333,6 +381,7 @@ def main():
     read_parser.add_argument("--sha256", required=True)
     read_parser.add_argument("--byte-length", required=True, type=int)
     read_parser.add_argument("--dest", required=True, type=Path)
+    sub.add_parser("canary")
     sub.add_parser("check-operator-gate")
     args = parser.parse_args()
     try:
@@ -340,6 +389,8 @@ def main():
             result = put(args.role, args.file, args.sha256)
         elif args.command == "read":
             result = read(args.uri, args.sha256, args.byte_length, args.dest)
+        elif args.command == "canary":
+            result = canary()
         else:
             result = {"operator_lock_gate": require_operator_lock_gate(),
                       "bucket": BUCKET, "account": ACCOUNT}

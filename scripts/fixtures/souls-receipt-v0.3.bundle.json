@@ -1,0 +1,45 @@
+{
+  "mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json",
+  "verificationMaterial": {
+    "certificate": {
+      "rawBytes": "c2hhcGUtb25seSBzeW50aGV0aWMgY2VydGlmaWNhdGU="
+    },
+    "tlogEntries": [
+      {
+        "logIndex": "12345",
+        "logId": {
+          "keyId": "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s="
+        },
+        "kindVersion": {
+          "kind": "dsse",
+          "version": "0.0.1"
+        },
+        "integratedTime": "1730000000",
+        "inclusionPromise": {
+          "signedEntryTimestamp": "c2hhcGUtb25seSBzeW50aGV0aWMgU0VU"
+        },
+        "inclusionProof": {
+          "logIndex": "12345",
+          "rootHash": "zc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc3Nzc0=",
+          "treeSize": "12346",
+          "hashes": [
+            "7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+/v7+8="
+          ],
+          "checkpoint": {
+            "envelope": "shape-only synthetic checkpoint"
+          }
+        },
+        "canonicalizedBody": "eyJraW5kIjoiZHNzZSJ9"
+      }
+    ]
+  },
+  "dsseEnvelope": {
+    "payload": "eyJfdHlwZSI6Imh0dHBzOi8vaW4tdG90by5pby9TdGF0ZW1lbnQvdjEiLCJwcmVkaWNhdGUiOnsiYnVpbGRlcl9zaGEyNTYiOiJzaGEyNTY6MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMyIsInJ1bl9hdHRlbXB0IjoxLCJydW5faWQiOiIxMjM0NTY3ODkwIiwic291cmNlX2NvbW1pdCI6IjExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTExMTEiLCJzb3VyY2VfcmVwb3NpdG9yeSI6InRydWUtbGluZS9hZ2VudC1ib3Qtc291bHMiLCJzb3VyY2VfdHJlZSI6IjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIiLCJ0b29sY2hhaW5fc2hhMjU2Ijoic2hhMjU2OjQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQ0NDQiLCJ3b3JrZmxvdyI6Ii5naXRodWIvd29ya2Zsb3dzL3NvdWxzLWJ1aWxkLXJlY2VpcHQueW1sIn0sInByZWRpY2F0ZVR5cGUiOiJodHRwczovL3RydWUtbGluZS5haS9zb3VsLWNvbnRyYWN0cy9hZGFwdGVyL3YyL3NvdWxzLWJ1aWxkIiwic3ViamVjdCI6W3siZGlnZXN0Ijp7InNoYTI1NiI6ImI5OTRhZGNiNzVlZWFhOTZlYzIxOTMwNDAzMDMwZDRkMzE4NmNmZDRkYmJlZWVhNjcyZTdkNGY4NDI4MGNjNDQifSwibmFtZSI6InNoYTI1Ni1iOTk0YWRjYjc1ZWVhYTk2ZWMyMTkzMDQwMzAzMGQ0ZDMxODZjZmQ0ZGJiZWVlYTY3MmU3ZDRmODQyODBjYzQ0LnRneiJ9XX0=",
+    "payloadType": "application/vnd.in-toto+json",
+    "signatures": [
+      {
+        "sig": "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqg=="
+      }
+    ]
+  }
+}
