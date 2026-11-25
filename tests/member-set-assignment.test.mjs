@@ -81,6 +81,31 @@ test('A-signed exact frozen two-member assignment is only a pre-launch claim', (
   assert.equal(verify(payload).payload.members.length, 2);
 });
 
+test('local-test member assignment accepts only its distinct signed purpose and reservation', () => {
+  const localPurpose = 'agent-bot/stage2a-member-set-assignment-local-test/v1';
+  const localReservation = 'agent-bot/stage2a-observed-body-local-test-reservation/v1';
+  const local = { ...payload, contract: 'machine/local-test-v1',
+    b_authority: { purpose: localReservation, envelope_sha256: reservation } };
+  const localEnvelope = (body, signedPurpose = localPurpose) => {
+    const bytes = jcs(body);
+    return jcs({ schema_version: 1, purpose: signedPurpose,
+      issuer_public_key_base64url: machinePin.toString('base64url'),
+      payload_sha256: hash(bytes), payload_base64url: bytes.toString('base64url'),
+      signature_base64url: sign(null,
+        Buffer.concat([Buffer.from(signedPurpose + '\0'), bytes]), pair.privateKey).toString('base64url') });
+  };
+  const run = (body, signedPurpose = localPurpose, want = { ...expected, local_test_mode: true }) =>
+    verifyMemberSetAssignment({ envelopeBytes: localEnvelope(body, signedPurpose),
+      machinePin, expected: want, frozen, now: Date.parse('2026-11-23T18:00:10Z') });
+  assert.equal(run(local).payload.contract, 'machine/local-test-v1');
+  assert.throws(() => run(local, purpose), /unsupported envelope/);
+  assert.throws(() => run(local, localPurpose, expected), /unsupported envelope/);
+  assert.throws(() => run({ ...local, contract: 'machine\/v3' }), /invalid payload shape/);
+  assert.throws(() => run({ ...local, b_authority: payload.b_authority }), /B authority differs/);
+  assert.throws(() => run({ ...local, profile_in_force: 'managed-cooperative' }),
+    /invalid payload shape/);
+});
+
 test('member-set assignment rejects altered, missing, wrong-host, wrong-plan and stale claims', () => {
   assert.throws(() => verify({ ...payload, members: [members[0]] }), /invalid payload shape/);
   assert.throws(() => verify({ ...payload, members: [members[0], { ...members[1], role: 'lead' }] }), /measured stock files/);
@@ -264,6 +289,162 @@ test('prestarted attach requires the signed child, B policy and aggregate Ready 
     { admitted_runtimes: runtimes }, machinePin, Date.parse('2026-11-23T18:00:19Z')),
   /expired|stale|signed member or endpoint/);
 
+  const localPurpose = 'agent-bot/stage2a-member-set-assignment-local-test/v1';
+  const localReservationPurpose = 'agent-bot/stage2a-observed-body-local-test-reservation/v1';
+  const localPayload = { ...payload, contract: 'machine/local-test-v1',
+    b_authority: { purpose: localReservationPurpose, envelope_sha256: reservation } };
+  const localAssignmentBytes = authority(localPurpose, localPayload);
+  const localAssignment = verifyMemberSetAssignment({
+    envelopeBytes: localAssignmentBytes, machinePin,
+    expected: { ...expected, local_test_mode: true },
+    frozen, now: at,
+  });
+  const localMap = { ...map, contract: 'hq/local-test-v1',
+    kind: 'stage2a-provisional-member-map-local-test',
+    assignment_envelope_sha256: localAssignment.envelopeSha256 };
+  const localChild = { ...child, contract: 'machine/local-test-v1',
+    assignment_envelope_sha256: localAssignment.envelopeSha256,
+    provisional_hq_mapping: localMap,
+    provisional_hq_mapping_sha256: hash(jcs(localMap)) };
+  const localChildBytes = authority('agent-bot/stage2a-member-set-child-observation-local-test/v1',
+    localChild);
+  const headerShape = { schema: 'stage2a-observed-body-header-shape/v1',
+    host: 'fixture.invalid', required_fixed: {}, required_volatile: {},
+    forbidden: [], allow_extra: false };
+  const ancillaryProfile = { schema: 'stage2a-stock-ancillary-local-test-profile/v1',
+    body_profile: 'stage2a-stock-ancillary-one-block/v1',
+    normalized_body_sha256: hash('ancillary'), first_header_shape: headerShape,
+    first_headers_sha256: hash('first headers'), second_header_shape: headerShape,
+    second_headers_sha256: hash('second headers'), order: ['first', 'second'],
+    target_after: ['first'], max_ancillary: 2, ancillary_http_status: 422 };
+  const runnerAccount = '_abm-sr-' + createHash('sha256')
+    .update(payload.installation_id).digest('hex').slice(0, 20);
+  const childSlot = createHash('sha256').update('agent-bot-soul-endpoint-start/v1\0')
+    .update(payload.installation_id).update('\0').update(payload.start_id)
+    .digest('hex').slice(0, 20);
+  const childRoot = '/var/agent-bot-soul-runner-' + runnerAccount + '/state/child-' + childSlot;
+  const cwdLexical = childRoot + '/work';
+  const cwdEmitted = '/private' + cwdLexical;
+  const homeLexical = childRoot + '/home';
+  const lt = { selected_member_id: members[0].member_id,
+    selected_launch_id: members[0].launch_id,
+    selected_member_selector: members[0].member_selector,
+    runner_account: runnerAccount,
+    expected_child_cwd_lexical: cwdLexical,
+    expected_child_cwd_emitted: cwdEmitted,
+    expected_child_home_lexical: homeLexical,
+    expected_memory_path_lexical: homeLexical + '/.claude/projects/'
+      + cwdEmitted.replace(/[^A-Za-z0-9]/g, '-') + '/memory/',
+    body_profile: 'stage2a-stock-observed-local-test/v1',
+    static_projection_sha256: hash('projection'), owner_prompt_sha256: hash('owner'),
+    r_first_brief_sha256: hash('brief'), header_shape: headerShape,
+    header_shape_sha256: hash(jcs(headerShape)), client_key_sha256: hash('key'),
+    model: 'fixture', http_host: 'fixture.invalid', messages_query: 'beta=true',
+    fixture_config_sha256: hash('fixture'), ancillary_profile: ancillaryProfile,
+    ancillary_profile_sha256: hash(jcs(ancillaryProfile)) };
+  const localQualification = { mode: 'observed-body-local-test/v1',
+    model: lt.model, body_profile: lt.body_profile,
+    static_projection_sha256: lt.static_projection_sha256,
+    owner_prompt_sha256: lt.owner_prompt_sha256,
+    r_first_brief_sha256: lt.r_first_brief_sha256,
+    header_shape_sha256: lt.header_shape_sha256,
+    client_key_sha256: lt.client_key_sha256, http_host: lt.http_host,
+    messages_query: lt.messages_query, response_text_sha256: hash('fixture response') };
+  const outerLaunchId = `ln_${'f'.repeat(24)}`;
+  const localPolicy = { ...policy, contract: 'machine/local-test-v1',
+    member_set_assignment_envelope_sha256: localAssignment.envelopeSha256,
+    b_authority: localPayload.b_authority, outer_launch_id: outerLaunchId, local_test: lt,
+    members: policy.members.map((row, i) => ({ ...row,
+      qualification: i === 0 ? localQualification : { mode: 'disabled' } })) };
+  const localPolicyBytes = authority('agent-bot/stage2a-b-member-authority-local-test/v1',
+    localPolicy);
+  const localRows = readyRows.map((row) => {
+    const bridge_arm = { ...row.bridge_arm,
+      child_observation_envelope_sha256: hash(localChildBytes) };
+    return { ...row, bridge_arm, bridge_arm_receipt_sha256: hash(jcs(bridge_arm)) };
+  });
+  const localReady = { ...ready, contract: 'machine/local-test-v1',
+    assignment_envelope_sha256: localAssignment.envelopeSha256,
+    child_observation_envelope_sha256: hash(localChildBytes),
+    member_b_authority_envelope_sha256: hash(localPolicyBytes),
+    provisional_hq_mapping_sha256: hash(jcs(localMap)), members: localRows };
+  const localReadyBytes = authority('agent-bot/stage2a-member-set-ready-local-test/v1',
+    localReady);
+  const localResult = { ...result, version: 'stage2a-member-attach-local-test/v1',
+    cwd: cwdLexical,
+    child_observation_envelope_base64url: localChildBytes.toString('base64url'),
+    child_observation_envelope_sha256: hash(localChildBytes),
+    member_b_authority_envelope_base64url: localPolicyBytes.toString('base64url'),
+    member_b_authority_envelope_sha256: hash(localPolicyBytes),
+    ready_envelope_base64url: localReadyBytes.toString('base64url'),
+    ready_envelope_sha256: hash(localReadyBytes) };
+  const localStart = { ...start, launchId: outerLaunchId, localTestMode: true };
+  const verifyLocal = (candidate = localResult, candidateAssignment = localAssignment,
+    candidateStart = localStart) =>
+    verifyMemberSetAttach(candidate, candidateStart, candidateAssignment,
+      { admitted_runtimes: runtimes }, machinePin, at);
+  assert.equal(verifyLocal().policy.local_test.static_projection_sha256,
+    lt.static_projection_sha256);
+  assert.throws(() => verifyLocal({ ...localResult, version: result.version }),
+    /invalid two-member H attach result/);
+  assert.throws(() => verifyLocal(localResult, assignment),
+    /invalid two-member H attach result/);
+  assert.throws(() => verifyLocal({ ...localResult,
+    member_b_authority_envelope_base64url: policyBytes.toString('base64url'),
+    member_b_authority_envelope_sha256: hash(policyBytes) }),
+  /signed envelope purpose/);
+  const localPolicyVariant = (body) => {
+    const policyBytes = authority('agent-bot/stage2a-b-member-authority-local-test/v1', body);
+    const readyBytes = authority('agent-bot/stage2a-member-set-ready-local-test/v1',
+      { ...localReady, member_b_authority_envelope_sha256: hash(policyBytes) });
+    return { ...localResult,
+      member_b_authority_envelope_base64url: policyBytes.toString('base64url'),
+      member_b_authority_envelope_sha256: hash(policyBytes),
+      ready_envelope_base64url: readyBytes.toString('base64url'),
+      ready_envelope_sha256: hash(readyBytes) };
+  };
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    outer_launch_id: members[0].launch_id })), /evidence chain differs/);
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    outer_launch_id: members[0].launch_id }), localAssignment,
+    { ...localStart, launchId: members[0].launch_id }), /local-test B policy/);
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    local_test: { ...lt, ancillary_profile_sha256: hash('wrong') } })),
+  /local-test B policy/);
+  const lateTarget = { ...ancillaryProfile, target_after: ['first', 'second'] };
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    local_test: { ...lt, ancillary_profile: lateTarget,
+      ancillary_profile_sha256: hash(jcs(lateTarget)) } })), /local-test B policy/);
+  const targetFirst = { ...ancillaryProfile, target_after: [] };
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    local_test: { ...lt, ancillary_profile: targetFirst,
+      ancillary_profile_sha256: hash(jcs(targetFirst)) } })), /local-test B policy/);
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    local_test: { ...lt,
+      expected_child_cwd_lexical: `/var/agent-bot-soul-runner-${runnerAccount}/work`,
+      expected_child_cwd_emitted: `/private/var/agent-bot-soul-runner-${runnerAccount}/work` } })),
+  /local-test B policy/);
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    local_test: { ...lt, expected_child_cwd_emitted: lt.expected_child_cwd_lexical } })),
+  /local-test B policy/);
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    local_test: { ...lt, expected_child_cwd_lexical: childRoot.replace(childSlot,
+      '0'.repeat(20)) + '/work' } })), /local-test B policy/);
+  assert.throws(() => verifyLocal({ ...localResult, cwd: '/var/other/work' }),
+    /local-test B policy/);
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    local_test: { ...lt, expected_memory_path_lexical:
+      lt.expected_memory_path_lexical.replace('/memory/', '/other/memory/') } })),
+  /local-test B policy/);
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    members: localPolicy.members.map((row, i) => i === 0 ? {
+      ...row, qualification: { ...row.qualification, request_sha256: hash('old request') },
+    } : row) })), /member child, B arm|local-test B policy/);
+  assert.throws(() => verifyLocal(localPolicyVariant({ ...localPolicy,
+    members: localPolicy.members.map((row, i) => i === 1 ? {
+      ...row, qualification: localQualification,
+    } : row) })), /member child, B arm/);
+
   const cooperativeEndpoint = { directory: '/fixture/member',
     socket_path: '/fixture/member/one.sock', owner_uid: 331, group_gid: 332,
     dir_mode: 0o2750, socket_mode: 0o660, expected_peer_uid: 332,
@@ -362,6 +543,10 @@ test('prestarted attach requires the signed child, B policy and aggregate Ready 
     verifyCooperativeMemberSetAttach(candidate, candidateStart, cooperativeAssignment,
       { admitted_runtimes: runtimes }, machinePin, at, relayCheck);
   assert.equal(verifyCooperative().ready.members.length, 2);
+  assert.throws(() => verifyMemberSetAttach(cooperativeResult,
+    { ...cooperativeStart, localTestMode: true }, cooperativeAssignment,
+    { admitted_runtimes: runtimes }, machinePin, at),
+  /cannot use cooperative/);
   assert.throws(() => verifyMemberSetAttach(cooperativeResult, cooperativeStart,
     cooperativeAssignment, { admitted_runtimes: runtimes }, machinePin, at),
   /endpoint parent is unavailable|relay socket is unavailable/);

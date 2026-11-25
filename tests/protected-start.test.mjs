@@ -152,6 +152,59 @@ test('two-member fd 3 keeps v3 reservation and assignment on the same pinned sta
   assert.throws(() => verifyProtectedStart({ ...v3, reservation_sha256: digest('wrong') }, ROOT, pin, now), /reservation envelope digest differs/);
 });
 
+test('local-test fd 3 accepts only an A-signed start-scope reservation', () => {
+  const { input, payload, now } = signedStart();
+  const purpose = 'agent-bot/stage2a-observed-body-local-test-reservation/v1';
+  const inventoryDigest = digest('R inventory');
+  const hDigest = digest('H descriptor');
+  const local = {
+    ...payload, contract: 'machine/local-test-v1',
+    kind: 'stage2a-observed-body-local-test-reservation', schema_version: 1,
+    start_scope: { mode: 'provider-pending-local-test/v1',
+      one_use_start_claim_name: 'local-test-start-fixture' },
+    assignment: { ...payload.assignment,
+      schema: 'agent-bot-machine/soul-start-assignment-local-test/v1',
+      bridge_account: '_abm-br-fixture', bridge_uid: process.getuid() + 1,
+      bridge_gid: process.getgid() + 1, broker: { socket_path: '/tmp/broker.sock' },
+      h_service_descriptor_digest: hDigest, r_inventory_digest: inventoryDigest },
+    measurement_binding: { ...payload.measurement_binding,
+      contract: 'machine/local-test-v1', schema_version: 1,
+      h_service_descriptor_digest: hDigest,
+      r_inventory: { inventory_digest: inventoryDigest }, r_components: [] },
+  };
+  const carrier = (body, signedPurpose = purpose) => {
+    const payloadBytes = Buffer.from(canonicalize(body));
+    const envelope = { schema_version: 1, purpose: signedPurpose,
+      issuer_public_key_base64url: b64(pin), payload_sha256: digest(payloadBytes),
+      payload_base64url: b64(payloadBytes),
+      signature_base64url: b64(sign(null,
+        Buffer.concat([Buffer.from(signedPurpose + '\0'), payloadBytes]), privateKey)) };
+    const bytes = Buffer.from(canonicalize(envelope));
+    return { ...input, schema: 'agent-bot-souls/protected-local-test-start/v1',
+      reservation_envelope_base64url: b64(bytes), reservation_sha256: digest(bytes),
+      member_set_assignment_envelope_base64url: b64('assignment fixture bytes') };
+  };
+  const signed = carrier(local);
+  const start = verifyProtectedStart(signed, ROOT, pin, now);
+  assert.equal(start.localTestMode, true);
+  assert.equal(start.reservationPurpose, purpose);
+  assert.equal(start.startClaimName, 'local-test-start-fixture');
+  assert.equal(start.bAuthoritySha256, signed.reservation_sha256);
+  assert.throws(() => verifyProtectedStart(carrier({ ...local, local_test: {} }), ROOT, pin, now),
+    /not start-only/);
+  assert.throws(() => verifyProtectedStart(carrier({ ...local, start_scope: {
+    mode: 'provider-ready/v1', one_use_start_claim_name: 'local-test-start-fixture' } }), ROOT, pin, now),
+  /not start-only/);
+  const { start_scope: omitted, ...noScope } = local;
+  assert.equal(omitted.mode, 'provider-pending-local-test/v1');
+  assert.throws(() => verifyProtectedStart(carrier(noScope), ROOT, pin, now),
+    /not start-only/);
+  assert.throws(() => verifyProtectedStart(carrier(local,
+    'agent-bot/stage2a-reservation/v3'), ROOT, pin, now), /unsupported reservation envelope/);
+  assert.throws(() => verifyProtectedStart({ ...signed,
+    schema: 'agent-bot-souls/protected-start/v2' }, ROOT, pin, now), /unsupported reservation envelope/);
+});
+
 test('run reads a bounded strict fd 3 pipe before touching ACP stdout', async () => {
   const pipeExec = [
     'import os, sys',
