@@ -33,21 +33,33 @@ const handlers = {
       if (error.code !== 'EEXIST') throw error;
       throw new Error(`${path} is already running. End the first session before restarting.`);
     }
-    // Keep one child alive so the tests can observe ownership across refusals and exits.
-    const child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
-    const exited = once(child, 'exit');
-    await writeFile(join(writer, 'pid'), String(child.pid));
+    let child;
+    let closed;
+    async function stop() {
+      if (child) {
+        child.stdin.end();
+        await closed;
+      }
+      await rm(writer, { recursive: true });
+    }
+    try {
+      child = spawn(process.execPath, ['-e', 'process.stdin.resume()'], { stdio: ['pipe', 'ignore', 'ignore'] });
+      // close also fires after a failed spawn, when there is no exit event.
+      closed = new Promise(resolve => child.once('close', resolve));
+      await once(child, 'spawn');
+      if (process.env.EXAMPLE_FAIL_AFTER_SPAWN) throw new Error(`example initialization failed for child ${child.pid}`);
+      await writeFile(join(writer, 'pid'), String(child.pid));
+    } catch (error) {
+      await stop();
+      throw error;
+    }
     return {
       async converse({ input, output, signal }) {
         const lines = createInterface({ input, signal, terminal: false });
         output.write('Owner conversation open.\n');
         for await (const line of lines) output.write(`Soul: received "${line}".\n`);
       },
-      async stop() {
-        child.stdin.end();
-        await exited;
-        await rm(writer, { recursive: true });
-      },
+      stop,
     };
   },
 };

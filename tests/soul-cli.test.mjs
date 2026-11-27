@@ -136,3 +136,19 @@ test('owner transcript, second local start, EOF, restart, and Ctrl-C', { timeout
   assert.throws(() => process.kill(restartedChild, 0), { code: 'ESRCH' });
   assert.equal(run(example, ['start', path], options).status, 0);
 });
+
+test('startup failure reaps a partially launched child and releases the writer before retry', (t) => {
+  const options = isolatedHome(t);
+  options.env.EXAMPLE_INSTALLED_HARNESS = 'example';
+  assert.equal(run(example, create, options).status, 0);
+  const failed = run(example, ['start', path], {
+    ...options, env: { ...options.env, EXAMPLE_FAIL_AFTER_SPAWN: '1' },
+  });
+  assert.equal(failed.status, 1);
+  assert.equal(failed.stdout, '');
+  const message = /^soul start: example initialization failed for child (\d+)\n$/;
+  assert.match(failed.stderr, message);
+  const pid = Number(message.exec(failed.stderr)[1]);
+  assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+  assert.equal(run(example, ['start', path], options).status, 0);
+});
