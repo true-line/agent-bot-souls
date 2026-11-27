@@ -13,11 +13,13 @@
     "node": ">=20"
   },
   "bin": {
-    "agent-bot-souls": "bin/agent-bot-souls.mjs"
+    "agent-bot-souls": "bin/agent-bot-souls.mjs",
+    "soul": "bin/soul.mjs"
   },
   "files": [
     "bin",
     "lib",
+    "docs/terminal-transcript.txt",
     "governance/soul-contracts.json",
     "scripts/prepare-contracts.mjs",
     "LICENSE",

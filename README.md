@@ -11,6 +11,35 @@ This repository's charter is its entry in the platform's
 The entry point is row 14 of agent-bot-hq's
 [migration plan](https://github.com/true-line/agent-bot-hq/blob/main/docs/daemon-plugin-split.md#9-migration-plan).
 
+## Owner terminal contract
+
+```sh
+soul create PATH --orchestrator HARNESS
+soul inspect PATH
+soul start PATH
+```
+
+Use `soul --help` to list commands and `soul COMMAND --help` for details.
+Quote paths containing spaces. Each command accepts one path.
+
+- **Create** saves the founding harness choice at a new path on a compatible
+  filesystem, even if that harness is absent. An existing target is refused.
+- **Inspect** reads the package without executing its code or provisioning
+  anything. It reports package validity, trust, and local readiness separately.
+  A completed inspection exits 0 even when the report identifies a missing harness.
+- **Start** requires the founding harness to be available locally. It opens the
+  owner's conversation in the foreground and holds the instance's local writer
+  for the session. A second start fails and leaves the first conversation active.
+  On EOF (Ctrl-D at an empty prompt) or Ctrl-C, the session stops its children,
+  waits for them to exit, and releases the writer. Run the same command again to
+  reopen the same Soul. EOF exits 0 and Ctrl-C exits 130 after successful cleanup.
+
+Usage errors exit 2. Operational failures, including an unavailable command
+implementation, exit 1 with a diagnostic on stderr. This build provides the
+parser and help. The [example terminal session](docs/terminal-transcript.txt)
+uses injected handlers to demonstrate the contract while package and harness
+integration is pending.
+
 ## Use
 
 ```sh

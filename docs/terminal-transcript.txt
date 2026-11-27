@@ -1,0 +1,21 @@
+Contract example with simulated package and harness handlers.
+
+$ soul create "My Soul.soul" --orchestrator example
+Created My Soul.soul with founding harness example.
+[exit 0]
+$ soul inspect "My Soul.soul"
+Validity: valid
+Trust: unverified
+Local readiness: missing harness example. Install it before starting.
+[exit 0]
+$ soul start "My Soul.soul"
+soul start: missing harness example. Install it and retry soul start.
+[exit 1]
+
+[The example harness is now available locally.]
+$ soul start "My Soul.soul"
+Owner conversation open.
+hello
+Soul: received "hello".
+[EOF]
+[exit 0]
